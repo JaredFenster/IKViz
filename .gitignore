@@ -1,0 +1,20 @@
+# Build output
+build/
+out/
+bin/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+# vcpkg artifacts
+vcpkg_installed/
+
+# IDE
+.vs/
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db
