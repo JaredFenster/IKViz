@@ -7,6 +7,10 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <vector>
 #include <iostream>
+#include "origin.h"
+#include <fstream>
+#include <nlohmann/json.hpp>
+#include "linkJoint.h"
 
 //Camera variables
 
@@ -18,10 +22,9 @@ static float g_radius = 3.0f;
 static glm::vec3 g_target(0.0f, 0.0f, 0.0f);
 static bool g_panning = false;
 static double g_panLastX = 0.0, g_panLastY = 0.0;
+static Origin* end;
 
 static bool rWasDown = false;
-
-
 
 static void scroll_callback(GLFWwindow*, double /*xoffset*/, double yoffset){
     //Zoom
@@ -29,11 +32,6 @@ static void scroll_callback(GLFWwindow*, double /*xoffset*/, double yoffset){
     if (g_radius < 0.3f) g_radius = 0.3f;
     if (g_radius > 50.0f) g_radius = 50.0f;
 }
-
-
-
-
-
 
 static void glfw_error_callback(int error, const char* description){
     // You can set a breakpoint here if you want
@@ -82,6 +80,8 @@ static GLuint linkProgram(GLuint vs, GLuint fs)
     return prog;
 }
 
+//------------------------------main------------------------------------------------------------------------------------------------------
+
 int main(){
     glfwSetErrorCallback(glfw_error_callback);
 
@@ -94,6 +94,7 @@ int main(){
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
     //Create a window
+    glfwWindowHint(GLFW_DEPTH_BITS, 24);
     GLFWwindow* window = glfwCreateWindow(1280, 720, "ArmViz", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
@@ -327,9 +328,76 @@ int main(){
     glm::vec3 up(0.0f, 0.0f, 1.0f);
     glm::vec3 forward(cosf(g_yaw) * cosf(g_pitch), sinf(g_yaw) * cosf(g_pitch), sinf(g_pitch));
     bool renderSphere = false;
-    //Main loop
+
+//------------------------robot-stuff--------------------------------------------------------------------------------
+
+
+    std::vector<Origin> origins;
+
+    std::ifstream file("origins.json");
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open origins.json");
+    }
+
+    nlohmann::json j;
+    file >> j;
+
+    const auto& arr = j.at("origins");
+    origins.reserve(arr.size());
+
+    for (const auto& o : arr) {
+        glm::vec3 pos(
+            o.at("position").at(0).get<float>(),
+            o.at("position").at(1).get<float>(),
+            o.at("position").at(2).get<float>()
+        );
+
+        int xDir = o.at("xDir").get<int>();
+        int zDir = o.at("zDir").get<int>();
+        float axisLength = o.value("axisLength", 0.2f);
+        int rotateAxis = o.value("rotateAxis", 3);
+        float angleDeg = o.value("angleDeg", 0.0f);
+
+        origins.emplace_back(pos, xDir, zDir, axisLength, rotateAxis, angleDeg);
+
+        // optional debug
+        std::cout << "Loaded "
+                  << o.value("name", std::string("unnamed"))
+                  << " at (" << pos.x << "," << pos.y << "," << pos.z << ")\n";
+    }
+
+    std::cout << "origins loaded = " << origins.size() << "\n";
+
+
+    for(int i = 0; i < origins.size(); i++){
+        origins[i].setAxisRadius(0.015f);
+        origins[i].setAxisLength(0.25f);
+        origins[i].setCylinderSlices(20);
+    }
+
+
+
+
+    origins.reserve(j["origins"].size());
+
+    //link
+    linkJoint robot(origins.at(0));
+    robot.addJoint(origins.at(1));
+    robot.addJoint(origins.at(2));
+    robot.addJoint(origins.at(3));
+    end = &origins.at(3);
+    robot.setLinkRadius(0.05f);
+    robot.setLinkSlices(18);
+
+
+
+//------------------------Main-Loop--------------------------------------------------------------------------------
+
+
+
     while (!glfwWindowShouldClose(window))
-    {
+    {   
+        glfwPollEvents();
         //Resize handling: tell OpenGL the window size
         int w, h;
         glfwGetFramebufferSize(window, &w, &h);
@@ -342,7 +410,7 @@ int main(){
         float halfW = orthoSize * aspect;
 
         // Perspective projection
-        proj = glm::ortho(-halfW, halfW, -halfH, halfH, -200.0f, 200.0f);
+        proj = glm::ortho(-halfW, halfW, -halfH, halfH, 200.0f, -200.0f);
 
 
         //panning basis
@@ -362,6 +430,15 @@ int main(){
         bool rDown = glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS;
         if(rDown && !rWasDown) g_target = glm::vec3(0);
         rWasDown = rDown;
+
+
+        if(glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS){
+            robot.reset();
+        }
+
+        if (glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS){
+            std::cout << "End Effector Pos: (" << end->getX() << ", " << end->getY() << ", " << end->getZ() <<")"<< std::endl;
+        }
 
 
         //Panning CTRL + MIDDLE
@@ -421,20 +498,32 @@ int main(){
         view = glm::lookAt(camPos, target, up);
 
 
-
-
         glUseProgram(program);
         glUniformMatrix4fv(uViewLoc, 1, GL_FALSE, glm::value_ptr(view));
         glUniformMatrix4fv(uProjLoc, 1, GL_FALSE, glm::value_ptr(proj));
 
         // grid
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        glDepthMask(GL_FALSE); 
+
         glm::mat4 I(1.0f);
         glUniformMatrix4fv(uModelLoc, 1, GL_FALSE, glm::value_ptr(I));
         glBindVertexArray(gridVAO);
         glDrawArrays(GL_LINES, 0, gridVertexCount);
+
+        glDepthMask(GL_TRUE); 
+        
         
         // Sphere
         if(renderSphere){
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LESS);
+
+            // don’t let the wireframe sphere write depth
+            glDepthMask(GL_FALSE);
+
+            glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
             glm::mat4 sphereModel(1.0f);
             sphereModel = glm::translate(sphereModel, glm::vec3(target));
             glUniformMatrix4fv(uModelLoc, 1, GL_FALSE, glm::value_ptr(sphereModel));
@@ -443,18 +532,35 @@ int main(){
             glDrawArrays(GL_TRIANGLES, 0, sphereVertexCount);
             glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
             renderSphere = false;
+
+            glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+
+            // restore normal depth writing
+            glDepthMask(GL_TRUE);
+        } 
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);  
+        glDepthMask(GL_TRUE);
+
+        //links
+        robot.link(program, uModelLoc);
+
+
+        //Origins
+        for (const Origin& o : origins) {
+            o.draw(program, uModelLoc);
         }
         
+        glDisable(GL_CULL_FACE);
+
 
         glBindVertexArray(0);
         //Show the frame
         glfwSwapBuffers(window);
-        //Process events
-        glfwPollEvents();
-        
     }
 
-    //Cleanup
+    //----------------------------Cleanup-----------------------------------------------------------------------------------------
     glDeleteBuffers(1, &gridVBO);
     glDeleteVertexArrays(1, &gridVAO);
     glDeleteProgram(program);

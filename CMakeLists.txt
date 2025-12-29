@@ -13,14 +13,20 @@ find_package(glfw3 CONFIG REQUIRED)
 find_package(glad CONFIG REQUIRED)
 find_package(glm CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 
-add_executable(ArmViz src/main.cpp)
+add_executable(ArmViz 
+  src/main.cpp
+  src/origin.cpp
+  src/linkJoint.cpp
+)
 
 target_link_libraries(ArmViz PRIVATE
     glfw
     glad::glad
     glm::glm
     imgui::imgui
+    nlohmann_json::nlohmann_json
 )
 
 if (MSVC)
