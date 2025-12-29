@@ -11,6 +11,12 @@
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include "linkJoint.h"
+#include "IK.h"
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
+
+
 
 //Camera variables
 
@@ -117,6 +123,20 @@ int main(){
     }
 
     glEnable(GL_DEPTH_TEST);
+
+    // -------------------- ImGui init --------------------
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    (void)io;
+
+    // Optional: style
+    ImGui::StyleColorsDark();
+
+    // Setup Platform/Renderer backends
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init("#version 330");
+
 
     //Setup 
 
@@ -389,6 +409,12 @@ int main(){
     robot.setLinkRadius(0.05f);
     robot.setLinkSlices(18);
 
+    IK ik(robot);
+    static glm::vec3 targetWorld(0.2f, 0.1f, 0.25f);
+
+    
+
+
 
 
 //------------------------Main-Loop--------------------------------------------------------------------------------
@@ -398,6 +424,12 @@ int main(){
     while (!glfwWindowShouldClose(window))
     {   
         glfwPollEvents();
+        // -------------------- ImGui frame start --------------------
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+        ImGuiIO& io = ImGui::GetIO(); // refresh each frame
+
         //Resize handling: tell OpenGL the window size
         int w, h;
         glfwGetFramebufferSize(window, &w, &h);
@@ -435,60 +467,123 @@ int main(){
         if(glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS){
             robot.reset();
         }
+        //if(glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS){
+        //    robot.rotateJoint(0, 5);
+        //}
+        //if(glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS){
+        //    robot.rotateJoint(1, 5);
+        //}
+        //if(glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS){
+        //    robot.rotateJoint(2, 5);
+        //}
+        //if(glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS){
+        //    robot.rotateJoint(3, 5);
+        //}
+
+
+
+        // -------------------- IK + UI controls --------------------
+        static bool  ikEnabled     = true;
+        static int   itersPerFrame = 2;
+        static float lambda        = 0.15f;
+        static float maxStepDeg    = 2.0f;
+
+        ImGui::Begin("IK Controls");
+        ImGui::Checkbox("Enable IK", &ikEnabled);
+        ImGui::DragFloat3("Target (world)", &targetWorld.x, 0.01f);
+        ImGui::SliderInt("Iterations / frame", &itersPerFrame, 1, 30);
+        ImGui::SliderFloat("Damping (lambda)", &lambda, 0.01f, 1.0f);
+        ImGui::SliderFloat("Max step (deg)", &maxStepDeg, 0.1f, 10.0f);
+
+        if (ImGui::Button("Reset Robot (K)")) {
+            robot.reset();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Target = End Effector")) {
+            targetWorld = end->getPos(); // uses your global end pointer
+        }
+
+        ImGui::Text("EE: (%.3f, %.3f, %.3f)", end->getPos().x, end->getPos().y, end->getPos().z);
+        ImGui::End();
+
+        // Smooth IK update (a few iterations per frame)
+        if (ikEnabled) {
+            ik.solvePosition(
+                targetWorld,
+                -1,
+                itersPerFrame,
+                1e-3f,
+                lambda,
+                maxStepDeg
+            );
+        }
+
+
 
         if (glfwGetKey(window, GLFW_KEY_P) == GLFW_PRESS){
             std::cout << "End Effector Pos: (" << end->getX() << ", " << end->getY() << ", " << end->getZ() <<")"<< std::endl;
         }
 
 
-        //Panning CTRL + MIDDLE
-        if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS && glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS){ //Change Pan here
-            double x, y;
-            glfwGetCursorPos(window, &x, &y);
+        // Only allow camera controls if ImGui is NOT capturing the mouse
+        if (!io.WantCaptureMouse) {
         
-            if (!g_panning) {
-                g_panning = true;
+            //Panning CTRL + MIDDLE
+            if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS &&
+                glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS)
+            {
+                double x, y;
+                glfwGetCursorPos(window, &x, &y);
+            
+                if (!g_panning) {
+                    g_panning = true;
+                    g_panLastX = x; g_panLastY = y;
+                }
+            
+                double dx = x - g_panLastX;
+                double dy = y - g_panLastY;
                 g_panLastX = x; g_panLastY = y;
+            
+                float panSpeed = g_radius * 0.0025f;
+                g_target += (-camRight * (float)dx + camUp * (float)dy) * panSpeed;
+                renderSphere = true;
             }
-        
-            double dx = x - g_panLastX;
-            double dy = y - g_panLastY;
-            g_panLastX = x; g_panLastY = y;
-        
-            // Pan speed: scale with ortho zoom so it feels consistent
-            float panSpeed = g_radius * 0.0025f;
-        
-            // Move target opposite the mouse drag (CAD feel)
-            g_target += (-camRight * (float)dx + camUp * (float)dy) * panSpeed;
-            renderSphere = true;
-        }
-        //Orbit MIDDLE
-        else if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS){ //Change Rotate Button Here
-            double x, y;
-            glfwGetCursorPos(window, &x, &y);
-        
-            if (!g_orbiting) {
-                g_orbiting = true;
+            //Orbit MIDDLE
+            else if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_MIDDLE) == GLFW_PRESS)
+            {
+                double x, y;
+                glfwGetCursorPos(window, &x, &y);
+            
+                if (!g_orbiting) {
+                    g_orbiting = true;
+                    g_lastX = x; g_lastY = y;
+                }
+            
+                double dx = x - g_lastX;
+                double dy = y - g_lastY;
                 g_lastX = x; g_lastY = y;
+            
+                const float sensitivity = 0.005f;
+                g_yaw   += (float)dx * sensitivity;
+                g_pitch += (float)(dy) * sensitivity;
+            
+                const float limit = 1.55334f;
+                if (g_pitch >  limit) g_pitch =  limit;
+                if (g_pitch < -limit) g_pitch = -limit;
+            
+                renderSphere = true;
+            }
+            else {
+                g_panning = false;
+                g_orbiting = false;
             }
         
-            double dx = x - g_lastX;
-            double dy = y - g_lastY;
-            g_lastX = x; g_lastY = y;
-        
-            const float sensitivity = 0.005f;
-            g_yaw   += (float)dx * sensitivity;
-            g_pitch += (float)(dy) * sensitivity; //Invert can happen here
-        
-            const float limit = 1.55334f; //89 degrees in radians
-            if (g_pitch >  limit) g_pitch =  limit;
-            if (g_pitch < -limit) g_pitch = -limit; 
-            renderSphere = true;
-        }
-        else{
+        } else {
+            // If ImGui is using the mouse, stop camera drags cleanly
             g_panning = false;
             g_orbiting = false;
         }
+
 
 
 
@@ -513,6 +608,19 @@ int main(){
         glDrawArrays(GL_LINES, 0, gridVertexCount);
 
         glDepthMask(GL_TRUE); 
+
+        robot.verts.clear();
+        robot.addVerts();
+        robot.setupBuffers();
+
+        ik.solvePosition(
+        targetWorld,
+        -1,      // end effector = last joint
+        2,       // only 2 iterations per frame
+        1e-3f,   // tolerance
+        0.15f,   // damping (increase if jitter)
+        2.0f     // max step deg (smaller = smoother)
+        );
         
         
         // Sphere
@@ -539,9 +647,30 @@ int main(){
             glDepthMask(GL_TRUE);
         } 
 
+
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
+        // don’t let the wireframe sphere write depth
+        glDepthMask(GL_FALSE);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        glm::mat4 sphereModel(1.0f);
+        sphereModel = glm::translate(sphereModel, glm::vec3(targetWorld));
+        glUniformMatrix4fv(uModelLoc, 1, GL_FALSE, glm::value_ptr(sphereModel));
+        glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        glBindVertexArray(sphereVAO);
+        glDrawArrays(GL_TRIANGLES, 0, sphereVertexCount);
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        renderSphere = false;
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        // restore normal depth writing
+        glDepthMask(GL_TRUE);
+
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LESS);  
         glDepthMask(GL_TRUE);
+
+        
 
         //links
         robot.link(program, uModelLoc);
@@ -557,10 +686,15 @@ int main(){
 
         glBindVertexArray(0);
         //Show the frame
+        ImGui::Render();
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);
     }
 
     //----------------------------Cleanup-----------------------------------------------------------------------------------------
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
     glDeleteBuffers(1, &gridVBO);
     glDeleteVertexArrays(1, &gridVAO);
     glDeleteProgram(program);

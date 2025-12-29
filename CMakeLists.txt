@@ -19,6 +19,7 @@ add_executable(ArmViz
   src/main.cpp
   src/origin.cpp
   src/linkJoint.cpp
+  src/IK.cpp
 )
 
 target_link_libraries(ArmViz PRIVATE
@@ -27,6 +28,20 @@ target_link_libraries(ArmViz PRIVATE
     glm::glm
     imgui::imgui
     nlohmann_json::nlohmann_json
+)
+
+# ---------------- ImGui backends (GLFW + OpenGL3) ----------------
+# vcpkg installs backend sources in the include directory.
+get_target_property(IMGUI_INCLUDE_DIR imgui::imgui INTERFACE_INCLUDE_DIRECTORIES)
+
+# INTERFACE_INCLUDE_DIRECTORIES can be a list; grab the first entry.
+list(GET IMGUI_INCLUDE_DIR 0 IMGUI_INC0)
+
+
+
+# Some builds also need the backend headers in include path (usually already covered)
+target_include_directories(ArmViz PRIVATE
+    "${IMGUI_INC0}/imgui/backends"
 )
 
 if (MSVC)

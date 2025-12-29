@@ -50,6 +50,22 @@ public:
 
     // If you already have this API used elsewhere:
     int getAxis() const { return rotateAxisInt_; }
+    // ---- IK accessors ----
+    const glm::vec3& getPos() const { return pos; }
+        
+    const glm::vec3& getXAxis() const { return xAxis; }
+    const glm::vec3& getYAxis() const { return yAxis; }
+    const glm::vec3& getZAxis() const { return zAxis; }
+        
+    int   getRotateAxisInt() const { return rotateAxisInt_; }
+    float getAngleDeg() const { return angleDeg_; }
+        
+    // Returns +/− xAxis/yAxis/zAxis depending on axisInt
+    glm::vec3 axisIntToWorldPublic(int axisInt) const { return axisIntToWorld_(axisInt); }
+        
+    // Convenience: the axis this joint rotates about (world space)
+    glm::vec3 getJointAxisWorld() const { return axisIntToWorld_(rotateAxisInt_); }
+
 
 private:
     glm::vec3 pos{}, xAxis{}, yAxis{}, zAxis{};

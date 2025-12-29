@@ -20,6 +20,9 @@ public:
     // Cylinder controls
     void setLinkRadius(float r) { linkRadius_ = r; }
     void setLinkSlices(int s)   { linkSlices_ = (s < 6) ? 6 : s; } // minimum sane
+    friend class IK;
+    std::vector<float> verts;
+    std::vector<Origin*> robot;
 
 private:
     // Cylinder params
@@ -27,8 +30,6 @@ private:
     int   linkSlices_ = 16;
     bool  capEnds_    = true;
 
-    std::vector<Origin*> robot;
-    std::vector<float> verts;
 
     GLsizei vertexCount = 0;
 
