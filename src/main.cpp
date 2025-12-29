@@ -123,6 +123,9 @@ int main(){
     }
 
     glEnable(GL_DEPTH_TEST);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
 
     // -------------------- ImGui init --------------------
     IMGUI_CHECKVERSION();
@@ -163,9 +166,11 @@ int main(){
                         in vec3 vColor;
                         out vec4 FragColor;
 
+                        uniform float uAlpha;
+
                         void main()
                         {
-                            FragColor = vec4(vColor, 1.0);
+                            FragColor = vec4(vColor, uAlpha);
                         }
                         )GLSL";
 
@@ -190,12 +195,12 @@ int main(){
     pushV((float)+gridHalf, 0, 0, 1, 0, 0);
 
     //Y
-    pushV(0, (float)-gridHalf, 0, 0, 0, 1);
-    pushV(0, (float)+gridHalf, 0, 0, 0, 1);
+    pushV(0, (float)-gridHalf, 0, 0, 1, 0);
+    pushV(0, (float)+gridHalf, 0, 0, 1, 0);
 
     //Z
-    pushV(0, 0, (float)-0, 0, 1, 0);
-    pushV(0, 0, (float)+2, 0, 1, 0);
+    pushV(0, 0, (float)-0, 0, 0, 1);
+    pushV(0, 0, (float)+2, 0, 0, 1);
     
 
     for (int i = -gridHalf; i <= gridHalf; i++) {
@@ -340,6 +345,8 @@ int main(){
     GLint uViewLoc = glGetUniformLocation(program, "uView");
     GLint uProjLoc = glGetUniformLocation(program, "uProj");
     GLint uModelLoc = glGetUniformLocation(program, "uModel");
+    GLint uAlphaLoc = glGetUniformLocation(program, "uAlpha");
+
 
 
 
@@ -378,12 +385,39 @@ int main(){
         int rotateAxis = o.value("rotateAxis", 3);
         float angleDeg = o.value("angleDeg", 0.0f);
 
-        origins.emplace_back(pos, xDir, zDir, axisLength, rotateAxis, angleDeg);
+        float minDeg = o.value("minDeg", -180.0f);
+        float maxDeg = o.value("maxDeg",  180.0f);
+
+        if (o.contains("limits")) {
+            const auto& lim = o.at("limits");
+            minDeg = lim.value("minDeg", minDeg);
+            maxDeg = lim.value("maxDeg", maxDeg);
+        }
+
+        bool enableLimits = o.contains("limits"); 
+        origins.emplace_back(
+            pos, xDir, zDir,
+            axisLength,
+            rotateAxis,
+            angleDeg,
+            /*axisRadius*/ 0.02f,
+            /*cylinderSlices*/ 16,
+            minDeg,
+            maxDeg,
+            enableLimits
+        );
 
         // optional debug
         std::cout << "Loaded "
                   << o.value("name", std::string("unnamed"))
                   << " at (" << pos.x << "," << pos.y << "," << pos.z << ")\n";
+
+        std::cout << "Joint " << origins.size()-1
+          << " hasLimits=" << origins.back().hasLimits()
+          << " min=" << origins.back().getMinDeg()
+          << " max=" << origins.back().getMaxDeg()
+          << "\n";
+
     }
 
     std::cout << "origins loaded = " << origins.size() << "\n";
@@ -402,17 +436,19 @@ int main(){
 
     //link
     linkJoint robot(origins.at(0));
-    robot.addJoint(origins.at(1));
-    robot.addJoint(origins.at(2));
-    robot.addJoint(origins.at(3));
-    end = &origins.at(3);
+    for(int i = 1; i < origins.size(); i++){
+        robot.addJoint(origins.at(i));
+    }
+    end = &origins.at(origins.size()-1);
     robot.setLinkRadius(0.05f);
     robot.setLinkSlices(18);
 
     IK ik(robot);
-    static glm::vec3 targetWorld(0.2f, 0.1f, 0.25f);
+    static glm::vec3 targetWorld(2.0f, 0.0f, 2.0f);
+    static glm::vec3 targetEulerDeg(0.0f, 0.0f, 0.0f);
+    static float rotWeight = 1.0f;
 
-    
+
 
 
 
@@ -467,18 +503,7 @@ int main(){
         if(glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS){
             robot.reset();
         }
-        //if(glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS){
-        //    robot.rotateJoint(0, 5);
-        //}
-        //if(glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS){
-        //    robot.rotateJoint(1, 5);
-        //}
-        //if(glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS){
-        //    robot.rotateJoint(2, 5);
-        //}
-        //if(glfwGetKey(window, GLFW_KEY_F) == GLFW_PRESS){
-        //    robot.rotateJoint(3, 5);
-        //}
+
 
 
 
@@ -490,10 +515,15 @@ int main(){
 
         ImGui::Begin("IK Controls");
         ImGui::Checkbox("Enable IK", &ikEnabled);
-        ImGui::DragFloat3("Target (world)", &targetWorld.x, 0.01f);
         ImGui::SliderInt("Iterations / frame", &itersPerFrame, 1, 30);
         ImGui::SliderFloat("Damping (lambda)", &lambda, 0.01f, 1.0f);
         ImGui::SliderFloat("Max step (deg)", &maxStepDeg, 0.1f, 10.0f);
+        ImGui::DragFloat3("Target Pos", &targetWorld.x, 0.01f);
+        ImGui::DragFloat3("Target RPY (deg)", &targetEulerDeg.x, 1.0f, -180.0f, 180.0f);
+
+        static float rotWeight = 1.0f;
+        ImGui::SliderFloat("Rot Weight", &rotWeight, 0.0f, 3.0f);
+
 
         if (ImGui::Button("Reset Robot (K)")) {
             robot.reset();
@@ -508,15 +538,22 @@ int main(){
 
         // Smooth IK update (a few iterations per frame)
         if (ikEnabled) {
-            ik.solvePosition(
+            glm::vec3 eulerRad = glm::radians(targetEulerDeg);
+            glm::quat targetRot = glm::quat(eulerRad);
+
+            ik.solvePose(
                 targetWorld,
+                targetRot,
                 -1,
                 itersPerFrame,
                 1e-3f,
+                1e-2f,
                 lambda,
-                maxStepDeg
+                maxStepDeg,
+                rotWeight
             );
         }
+
 
 
 
@@ -601,6 +638,7 @@ int main(){
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LESS);
         glDepthMask(GL_FALSE); 
+        
 
         glm::mat4 I(1.0f);
         glUniformMatrix4fv(uModelLoc, 1, GL_FALSE, glm::value_ptr(I));
@@ -613,14 +651,6 @@ int main(){
         robot.addVerts();
         robot.setupBuffers();
 
-        ik.solvePosition(
-        targetWorld,
-        -1,      // end effector = last joint
-        2,       // only 2 iterations per frame
-        1e-3f,   // tolerance
-        0.15f,   // damping (increase if jitter)
-        2.0f     // max step deg (smaller = smoother)
-        );
         
         
         // Sphere
@@ -664,7 +694,6 @@ int main(){
         renderSphere = false;
         glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
         // restore normal depth writing
-        glDepthMask(GL_TRUE);
 
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LESS);  
@@ -673,10 +702,15 @@ int main(){
         
 
         //links
+        glDepthMask(GL_FALSE);
+        glUseProgram(program);
+        glUniform1f(uAlphaLoc, 0.35f);  // ← link opacity (0 = invisible, 1 = solid)
         robot.link(program, uModelLoc);
+        glDepthMask(GL_TRUE); 
 
 
         //Origins
+        glUniform1f(uAlphaLoc, 1.0f);   // axes fully opaque
         for (const Origin& o : origins) {
             o.draw(program, uModelLoc);
         }

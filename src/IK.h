@@ -1,32 +1,56 @@
 #pragma once
-#include <glm/glm.hpp>
+
+#define GLM_ENABLE_EXPERIMENTAL
 #include <vector>
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 class linkJoint;
 class Origin;
+
+// 6D Jacobian column: [linear; angular]
+struct JCol6 {
+    glm::vec3 v; // linear
+    glm::vec3 w; // angular
+};
 
 class IK {
 public:
     explicit IK(linkJoint& robot);
 
-    // Position-only IK. End effector = robot[endIdx]->getPos()
-    // Returns true if converged.
+    // Position-only IK (existing)
     bool solvePosition(
         const glm::vec3& targetWorld,
         int endEffectorIndex = -1,
-        int maxIterations = 25,
+        int maxIterations = 30,
         float tolerance = 1e-3f,
-        float lambda = 0.10f,     // damping
-        float maxStepDeg = 4.0f   // per-joint update clamp
+        float lambda = 0.15f,
+        float maxStepDeg = 2.0f
+    );
+
+    // Pose IK (position + orientation)
+    bool solvePose(
+        const glm::vec3& targetPosWorld,
+        const glm::quat& targetRotWorld,
+        int endEffectorIndex = -1,
+        int maxIterations = 30,
+        float posTolerance = 1e-3f,
+        float rotToleranceRad = 1e-2f,
+        float lambda = 0.15f,
+        float maxStepDeg = 2.0f,
+        float rotWeight = 1.0f
     );
 
 private:
     linkJoint& robot_;
 
-    // Convenience
+    // Utilities
+    static float clampf(float v, float lo, float hi);
+
+    // Access robot chain (requires friend class IK in linkJoint)
     const std::vector<Origin*>& chain_() const;
 
-    // J columns: Ji = w_i x (pEE - p_i)
+    // Position Jacobian (3×N)
     void buildJacobian(
         const std::vector<Origin*>& chain,
         int endIdx,
@@ -34,7 +58,15 @@ private:
         std::vector<glm::vec3>& Jcols
     ) const;
 
-    // DLS: dθ = (JᵀJ + λ²I)^-1 Jᵀ e
+    // Pose Jacobian (6×N)
+    void buildJacobianPose(
+        const std::vector<Origin*>& chain,
+        int endIdx,
+        const glm::vec3& pEE,
+        std::vector<JCol6>& Jcols
+    ) const;
+
+    // DLS solvers
     bool solveDLS(
         const std::vector<glm::vec3>& Jcols,
         const glm::vec3& e,
@@ -42,19 +74,26 @@ private:
         std::vector<float>& outDeltaThetaRad
     ) const;
 
-    // Solve A x = b (Gauss-Jordan)
+    bool solveDLS6(
+        const std::vector<JCol6>& Jcols,
+        const glm::vec3& ep,
+        const glm::vec3& er,
+        float lambda,
+        float rotWeight,
+        std::vector<float>& outDeltaThetaRad
+    ) const;
+
+    // Small linear solver (Gauss-Jordan)
     bool solveLinearSystem(
         std::vector<std::vector<float>>& A,
         std::vector<float>& b
     ) const;
 
-    // Apply rotation at joint i and propagate to downstream joints
+    // Apply 1 joint update with limits and propagate to downstream joints
     void applyDeltaDeg(
         const std::vector<Origin*>& chain,
         int jointIdx,
         float deltaDeg,
         int endIdx
     ) const;
-
-    static float clampf(float v, float lo, float hi);
 };

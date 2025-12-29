@@ -1,17 +1,51 @@
 #pragma once
 #include <glm/glm.hpp>
 #include <glad/glad.h>
+#include <glm/gtc/quaternion.hpp>
+
 
 class Origin {
 public:
+        // Limits
+    void setLimitsDeg(float minDeg, float maxDeg) {
+        minDeg_ = minDeg;
+        maxDeg_ = maxDeg;
+        limitsEnabled_ = true;
+        // optional: clamp current angle to be safe
+        setAngleDeg(angleDeg_);
+    }
+    
+    void clearLimits() { limitsEnabled_ = false; }
+    
+    bool  hasLimits() const { return limitsEnabled_; }
+    float getMinDeg() const { return minDeg_; }
+    float getMaxDeg() const { return maxDeg_; }
+    
+    // For IK convenience (clamp without changing enable state)
+    float clampToLimits(float deg) const {
+        if (!limitsEnabled_) return deg;
+        if (deg < minDeg_) return minDeg_;
+        if (deg > maxDeg_) return maxDeg_;
+        return deg;
+    }
+
+
+
+
     Origin(const glm::vec3& position,
-           int xDir,
-           int zDir,
-           float axisLength = 0.2f,
-           int rotateAxis = 3,
-           float angleDeg = 0.0f,
-           float axisRadius = 0.02f,
-           int cylinderSlices = 16);
+       int xDir,
+       int zDir,
+       float axisLength,
+       int rotateAxis,
+       float angleDeg,
+       float axisRadius = 0.02f,
+       int cylinderSlices = 16,
+       float minDeg = -180.0f,
+       float maxDeg =  180.0f,
+       bool enableLimits = false);
+
+
+
 
     Origin(const Origin&) = delete;
     Origin& operator=(const Origin&) = delete;
@@ -66,10 +100,25 @@ public:
     // Convenience: the axis this joint rotates about (world space)
     glm::vec3 getJointAxisWorld() const { return axisIntToWorld_(rotateAxisInt_); }
 
+    glm::mat3 getRotationMat3() const {
+        // columns are the basis vectors in world space
+        return glm::mat3(xAxis, yAxis, zAxis);
+    }
+
+    glm::quat getRotationQuat() const {
+        return glm::quat_cast(getRotationMat3());
+    }
+
+
 
 private:
     glm::vec3 pos{}, xAxis{}, yAxis{}, zAxis{};
     float length = 0.2f;
+
+    float minDeg_ = -180.0f;
+    float maxDeg_ =  180.0f;
+    bool  limitsEnabled_ = false;
+
 
     int rotateAxisInt_ = 3;
     float angleDeg_ = 0.0f;

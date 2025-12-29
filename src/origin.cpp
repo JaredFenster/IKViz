@@ -11,13 +11,20 @@ Origin::Origin(const glm::vec3& position,
                int rotateAxis,
                float angleDeg,
                float axisRadius,
-               int cylinderSlices)
+               int cylinderSlices,
+               float minDeg,
+               float maxDeg,
+               bool enableLimits)
     : pos(position),
       length(axisLength),
+      minDeg_(minDeg),
+      maxDeg_(maxDeg),
+      limitsEnabled_(enableLimits),
       rotateAxisInt_(rotateAxis),
       angleDeg_(0.0f),
       radius_(axisRadius),
       slices_((cylinderSlices < 6) ? 6 : cylinderSlices)
+
 {
     xAxis = dirFromInt(xDir);
     zAxis = dirFromInt(zDir);
@@ -124,14 +131,23 @@ void Origin::rotateAboutOtherOriginAxis(const Origin& other,
 }
 
 void Origin::rotate(float deltaDeg) {
-    rotateAboutAxisInt(rotateAxisInt_, deltaDeg);
-    angleDeg_ += deltaDeg;
+    float desired = angleDeg_ + deltaDeg;
+    float clamped = clampToLimits(desired);
+    float applied = clamped - angleDeg_;
+
+    if (std::fabs(applied) < 1e-9f) return;
+
+    rotateAboutAxisInt(rotateAxisInt_, applied);
+    angleDeg_ += applied;
 }
 
+
 void Origin::setAngleDeg(float deg) {
+    deg = clampToLimits(deg);
     float delta = deg - angleDeg_;
     rotate(delta);
 }
+
 
 void Origin::reset() {
     pos      = initPos_;
@@ -333,8 +349,8 @@ void Origin::drawAxisCylinder_(GLuint program, GLint uModelLoc,
 void Origin::draw(GLuint program, GLint uModelLoc) const {
     // Draw 3 axis cylinders with standard colors
     drawAxisCylinder_(program, uModelLoc, xAxis, glm::vec3(1,0,0));
-    drawAxisCylinder_(program, uModelLoc, yAxis, glm::vec3(0,1,0));
-    drawAxisCylinder_(program, uModelLoc, zAxis, glm::vec3(0,0,1));
+    drawAxisCylinder_(program, uModelLoc, yAxis, glm::vec3(0,0,1));
+    drawAxisCylinder_(program, uModelLoc, zAxis, glm::vec3(0,1,0));
 }
 
 // ---------------------- Move + destroy ----------------------
