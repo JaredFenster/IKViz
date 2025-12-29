@@ -15,12 +15,19 @@ find_package(glm CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
-add_executable(ArmViz 
+add_executable(ArmViz
   src/main.cpp
-  src/origin.cpp
-  src/linkJoint.cpp
-  src/IK.cpp
+  src/App.cpp
+  src/Renderer/Shader.cpp
+  src/Renderer/Mesh.cpp
+  src/Renderer/Primitives.cpp
+  src/Camera/OrbitCamera.cpp
+  src/Robot/RobotScene.cpp
+  src/Linker/origin.cpp
+  src/Linker/linkJoint.cpp
+  src/InverseKinematics/IK.cpp
 )
+
 
 target_link_libraries(ArmViz PRIVATE
     glfw

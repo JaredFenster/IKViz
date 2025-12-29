@@ -1,7 +1,7 @@
 #define GLM_ENABLE_EXPERIMENTAL
 #include "IK.h"
-#include "linkJoint.h"
-#include "origin.h"
+#include "../Linker/linkJoint.h"
+#include "../Linker/origin.h"
 #include <glm/gtc/constants.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
