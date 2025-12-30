@@ -20,6 +20,10 @@ public:
     void reset();
     void uiAndSolve();
     void draw(const Shader& shader, const Mesh& sphereWire);
+    glm::vec3 eePos(){ return origins_.back().getPos(); }
+    glm::quat eeRot(){ return origins_.back().getRotationQuat(); }
+    void setIKTarget(const glm::vec3& pos, const glm::quat& rot);
+
 
 private:
     void loadFromJson(const std::string& path);

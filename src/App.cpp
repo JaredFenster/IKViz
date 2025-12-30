@@ -15,6 +15,7 @@
 #include "Renderer/Primitives.h"
 #include "Camera/OrbitCamera.h"
 #include "Robot/RobotScene.h"
+#include "ImGuizmo/ImGuizmo.h"
 
 static void glfw_error_callback(int error, const char* description) {
     (void)error; (void)description;
@@ -103,7 +104,7 @@ void App::endFrame() {
 }
 
 void App::run() {
-    // --- Shader sources (kept here, or move into a .glsl file later) ---
+    // --- Shaders ---
     const char* vsSrc = R"GLSL(
         #version 330 core
         layout (location = 0) in vec3 aPos;
@@ -132,36 +133,92 @@ void App::run() {
     Shader shader(vsSrc, fsSrc);
 
     // Geometry
-    Mesh grid = Mesh::fromVertexColorLines(makeGridVerts(/*gridHalf=*/10));
+    Mesh grid = Mesh::fromVertexColorLines(makeGridVerts(10));
     Mesh sphere = Mesh::fromVertexColorTriangles(makeSphereVerts(0.05f, 24, 16));
 
-    // Camera + input
+    // Camera
     OrbitCamera camera;
     camera.attachToWindow(window_);
 
-    // Robot scene (origins.json + linkJoint + IK + ImGui panel)
+    // Robot
     RobotScene robot("origins.json");
 
+    // Gizmo
+    static ImGuizmoLite::Gizmo gizmo;
+    static bool gizmoInit = false;
+
+    std::vector<float> gizmoVerts;
+
+    auto drawLine = [&](const glm::vec3& a, const glm::vec3& b, const glm::vec3& c) {
+        gizmoVerts.insert(gizmoVerts.end(), {a.x,a.y,a.z, c.x,c.y,c.z});
+        gizmoVerts.insert(gizmoVerts.end(), {b.x,b.y,b.z, c.x,c.y,c.z});
+    };
+
     bool rWasDown = false;
+    static bool prevMouseDown = false;
 
     while (!glfwWindowShouldClose(window_)) {
         beginFrame();
-
         ImGuiIO& io = ImGui::GetIO();
 
-        // hotkeys not blocked by imgui keyboard: you can gate if you want
+        // Hotkeys
         bool rDown = glfwGetKey(window_, GLFW_KEY_R) == GLFW_PRESS;
         if (rDown && !rWasDown) camera.resetTarget();
         rWasDown = rDown;
 
         if (glfwGetKey(window_, GLFW_KEY_K) == GLFW_PRESS) {
             robot.reset();
+            gizmoInit = false;
         }
 
-        // Update camera (mouse controls only if imgui not capturing mouse)
-        camera.updateFromInput(io.WantCaptureMouse);
+        // Mouse
+        double mx, my;
+        glfwGetCursorPos(window_, &mx, &my);
 
-        // Matrices
+        int w, h;
+        glfwGetFramebufferSize(window_, &w, &h);
+
+        bool lmbDown = glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+        bool lmbPressed  = (lmbDown && !prevMouseDown);
+        bool lmbReleased = (!lmbDown && prevMouseDown);
+        prevMouseDown = lmbDown;
+
+        // End effector pose (robot state)
+        ImGuizmoLite::Pose ee{
+            robot.eePos(),
+            robot.eeRot()
+        };
+
+        // Initialize gizmo target ONCE from current EE
+        if (!gizmoInit) {
+            gizmo.setTarget(ee);
+            gizmoInit = true;
+        }
+
+        // IMPORTANT: gizmo anchor pose is the TARGET, not the EE
+        ImGuizmoLite::Pose gizmoPose = gizmo.target;
+
+        glm::vec3 camPos = camera.getCamPos();
+        glm::vec3 camForward = glm::normalize(gizmoPose.pos - camPos);
+
+        // Update gizmo FIRST (picking/dragging happens around the target pose)
+        gizmo.update(
+            gizmoPose,
+            camera.view(),
+            camera.orthoProjFromRadius(window_),
+            camPos,
+            camForward,
+            (float)mx, (float)my,
+            (float)w, (float)h,
+            lmbDown, lmbPressed, lmbReleased
+        );
+
+        // Camera only if gizmo not active
+        if (!gizmo.capturingMouse) {
+            camera.updateFromInput(io.WantCaptureMouse);
+        }
+
+        // Matrices AFTER camera update
         glm::mat4 view = camera.view();
         glm::mat4 proj = camera.orthoProjFromRadius(window_);
 
@@ -169,14 +226,27 @@ void App::run() {
         shader.setMat4("uView", view);
         shader.setMat4("uProj", proj);
 
-        // Draw grid
+        // IK target from gizmo (this is what robot tries to reach)
+        robot.setIKTarget(gizmo.target.pos, gizmo.target.rot);
+        robot.uiAndSolve();
+
+        // Grid
         shader.setFloat("uAlpha", 1.0f);
         shader.setMat4("uModel", glm::mat4(1.0f));
         grid.drawLines();
 
-        // Robot UI + IK solve + draw
-        robot.uiAndSolve();
+        // Robot
         robot.draw(shader, sphere);
+
+        // Gizmo draw AT TARGET
+        gizmoVerts.clear();
+        gizmo.draw(gizmo.target, proj, drawLine);
+
+        if (!gizmoVerts.empty()) {
+            Mesh gizmoMesh = Mesh::fromVertexColorLines(gizmoVerts);
+            shader.setMat4("uModel", glm::mat4(1.0f));
+            gizmoMesh.drawLines();
+        }
 
         endFrame();
     }

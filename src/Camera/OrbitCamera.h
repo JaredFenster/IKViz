@@ -15,6 +15,7 @@ public:
 
     const glm::vec3& target() const { return target_; }
     float radius() const { return radius_; }
+    glm::vec3 getCamPos() const;
 
 private:
     static void scrollCallback(GLFWwindow* window, double xoff, double yoff);

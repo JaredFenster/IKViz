@@ -16,6 +16,12 @@ void OrbitCamera::scrollCallback(GLFWwindow*, double, double yoff) {
     if (g_cam->radius_ > 50.0f) g_cam->radius_ = 50.0f;
 }
 
+glm::vec3 OrbitCamera::getCamPos() const {
+    glm::vec3 forward(cosf(yaw_) * cosf(pitch_), sinf(yaw_) * cosf(pitch_), sinf(pitch_));
+    glm::vec3 camPos = target_ - forward * radius_;
+    return camPos;
+}
+
 void OrbitCamera::updateFromInput(bool imguiCapturingMouse) {
     if (!window_) return;
 

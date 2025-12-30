@@ -1,3 +1,4 @@
+#define GLM_ENABLE_EXPERIMENTAL
 #include "RobotScene.h"
 #include "../Renderer/Shader.h"
 #include "../Renderer/Mesh.h"
@@ -13,6 +14,9 @@
 #include <nlohmann/json.hpp>
 #include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtx/euler_angles.hpp>
+
 
 RobotScene::RobotScene(const std::string& jsonPath) {
     loadFromJson(jsonPath);
@@ -157,4 +161,14 @@ void RobotScene::draw(const Shader& shader, const Mesh& sphereWire) {
     for (const Origin& o : origins_) {
         o.draw(shader.id(), glGetUniformLocation(shader.id(), "uModel"));
     }
+}
+
+
+void RobotScene::setIKTarget(const glm::vec3& pos, const glm::quat& rot)
+{
+    targetWorld_ = pos;
+
+    // Convert quat → Euler degrees (XYZ)
+    glm::vec3 eulerRad = glm::eulerAngles(rot);
+    targetEulerDeg_ = glm::degrees(eulerRad);
 }
