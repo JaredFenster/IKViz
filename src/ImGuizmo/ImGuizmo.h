@@ -2,10 +2,13 @@
 /*
   ImGuizmoLite.h (lightweight, header-only transform gizmo)
 
-  - Translation arrows (X/Y/Z)
-  - Rotation rings (X/Y/Z)
+  - Translation arrows (X/Y/Z)      (now drawn as cylinders if supported)
+  - Rotation rings (X/Y/Z)          (now drawn as tube segments if supported)
   - Ray pick + drag updates a target pose
-  - Drawing uses a user callback: drawLine(p0, p1, rgb)
+
+  Drawing uses a user callback:
+    - Either: drawLine(p0, p1, rgb)
+    - Or:     drawCylinder(p0, p1, radius, rgb)
 
   ORTHO SIZE FIX:
   - Gizmo feature sizes are derived from the ORTHO projection scale, not camera->EE distance.
@@ -20,6 +23,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <cmath>
 #include <optional>
+#include <type_traits>
+#include <algorithm>
 
 namespace ImGuizmoLite {
 
@@ -44,9 +49,16 @@ struct Settings {
     float baseAxisLen     = 0.25f;
     float baseRingRadius  = 0.18f;
 
-    // Pick thresholds in ortho-radius units
+    // NEW: actual rendered thickness (also in ortho-radius units)
+    float baseAxisRadius     = 0.012f; // cylinder radius for axis
+    float baseRingTubeRadius = 0.010f; // cylinder radius for ring tube
+
+    // Pick thresholds in ortho-radius units (minimum). We also auto-expand based on radii.
     float basePickAxisThickness = 0.03f;
     float basePickRingThickness = 0.03f;
+
+    // NEW: how much to expand pick thickness relative to rendered radius
+    float pickRadiusMultiplier = 2.0f; // pickThickness >= radius * multiplier
 
     // drawing resolution
     int ringSegments = 64;
@@ -93,10 +105,15 @@ public:
         // for a standard glm::ortho(-r*aspect, r*aspect, -r, r, ...)
         float orthoRadius = orthoRadiusFromProj(proj);
 
-        float axisLen    = s.baseAxisLen * orthoRadius;
-        float ringR      = s.baseRingRadius * orthoRadius;
-        float pickAxisTh = s.basePickAxisThickness * orthoRadius;
-        float pickRingTh = s.basePickRingThickness * orthoRadius;
+        float axisLen      = s.baseAxisLen * orthoRadius;
+        float ringR        = s.baseRingRadius * orthoRadius;
+        float axisRad      = s.baseAxisRadius * orthoRadius;
+        float ringTubeRad  = s.baseRingTubeRadius * orthoRadius;
+
+        // Picking thickness: at least the configured base threshold, but also
+        // at least (renderRadius * multiplier) so “thicker visuals” are easier to click.
+        float pickAxisTh = std::max(s.basePickAxisThickness * orthoRadius, axisRad * s.pickRadiusMultiplier);
+        float pickRingTh = std::max(s.basePickRingThickness * orthoRadius, ringTubeRad * s.pickRadiusMultiplier);
 
         Ray ray = makeMouseRayWorld(mouseX, mouseY, viewportW, viewportH, view, proj);
 
@@ -123,12 +140,17 @@ public:
     }
 
     // Drawing: pass proj so sizing matches ortho exactly.
-    template <typename DrawLineFn>
-    void draw(const Pose& ee, const glm::mat4& proj, DrawLineFn&& drawLine) const {
+    // DrawFn can be either:
+    //   drawLine(p0, p1, rgb)
+    //   drawCylinder(p0, p1, radius, rgb)
+    template <typename DrawFn>
+    void draw(const Pose& ee, const glm::mat4& proj, DrawFn&& drawFn) const {
         float orthoRadius = orthoRadiusFromProj(proj);
 
-        float axisLen = s.baseAxisLen * orthoRadius;
-        float ringR   = s.baseRingRadius * orthoRadius;
+        float axisLen      = s.baseAxisLen * orthoRadius;
+        float ringR        = s.baseRingRadius * orthoRadius;
+        float axisRad      = s.baseAxisRadius * orthoRadius;
+        float ringTubeRad  = s.baseRingTubeRadius * orthoRadius;
 
         glm::vec3 X = ee.rot * glm::vec3(1,0,0);
         glm::vec3 Y = ee.rot * glm::vec3(0,1,0);
@@ -140,15 +162,15 @@ public:
             return axisCol;
         };
 
-        // arrows (simple lines; add arrowheads later if you want)
-        drawLine(ee.pos, ee.pos + X * axisLen, colFor(Handle::MoveX, s.colX));
-        drawLine(ee.pos, ee.pos + Y * axisLen, colFor(Handle::MoveY, s.colY));
-        drawLine(ee.pos, ee.pos + Z * axisLen, colFor(Handle::MoveZ, s.colZ));
+        // axes (cylinders if supported)
+        drawSegment(ee.pos, ee.pos + X * axisLen, axisRad, colFor(Handle::MoveX, s.colX), drawFn);
+        drawSegment(ee.pos, ee.pos + Y * axisLen, axisRad, colFor(Handle::MoveY, s.colY), drawFn);
+        drawSegment(ee.pos, ee.pos + Z * axisLen, axisRad, colFor(Handle::MoveZ, s.colZ), drawFn);
 
-        // rings
-        drawRing(ee.pos, X, ringR, colFor(Handle::RotX, s.ringUsesAxisColor ? s.colX : glm::vec3(1)), drawLine);
-        drawRing(ee.pos, Y, ringR, colFor(Handle::RotY, s.ringUsesAxisColor ? s.colY : glm::vec3(1)), drawLine);
-        drawRing(ee.pos, Z, ringR, colFor(Handle::RotZ, s.ringUsesAxisColor ? s.colZ : glm::vec3(1)), drawLine);
+        // rings (tube segments if supported)
+        drawRingTube(ee.pos, X, ringR, ringTubeRad, colFor(Handle::RotX, s.ringUsesAxisColor ? s.colX : glm::vec3(1)), drawFn);
+        drawRingTube(ee.pos, Y, ringR, ringTubeRad, colFor(Handle::RotY, s.ringUsesAxisColor ? s.colY : glm::vec3(1)), drawFn);
+        drawRingTube(ee.pos, Z, ringR, ringTubeRad, colFor(Handle::RotZ, s.ringUsesAxisColor ? s.colZ : glm::vec3(1)), drawFn);
     }
 
 private:
@@ -366,13 +388,43 @@ private:
     void endDrag() { active = Handle::None; }
 
 private:
-    template <typename DrawLineFn>
-    void drawRing(
+    // ---- draw dispatch (line fallback / cylinder preferred) ----
+
+    template <typename Fn>
+    static constexpr bool HasDrawCylinder =
+        std::is_invocable_v<Fn, const glm::vec3&, const glm::vec3&, float, const glm::vec3&>;
+
+    template <typename Fn>
+    static constexpr bool HasDrawLine =
+        std::is_invocable_v<Fn, const glm::vec3&, const glm::vec3&, const glm::vec3&>;
+
+    template <typename DrawFn>
+    static void drawSegment(
+        const glm::vec3& a,
+        const glm::vec3& b,
+        float radius,
+        const glm::vec3& color,
+        DrawFn&& drawFn
+    ){
+        if constexpr (HasDrawCylinder<DrawFn>) {
+            drawFn(a, b, radius, color);
+        } else if constexpr (HasDrawLine<DrawFn>) {
+            (void)radius;
+            drawFn(a, b, color);
+        } else {
+            static_assert(HasDrawLine<DrawFn> || HasDrawCylinder<DrawFn>,
+                "DrawFn must be drawLine(p0,p1,color) or drawCylinder(p0,p1,radius,color)");
+        }
+    }
+
+    template <typename DrawFn>
+    void drawRingTube(
         const glm::vec3& center,
         const glm::vec3& normal,
         float r,
+        float tubeRadius,
         const glm::vec3& color,
-        DrawLineFn&& drawLine
+        DrawFn&& drawFn
     ) const {
         glm::vec3 n = glm::normalize(normal);
 
@@ -388,7 +440,10 @@ private:
         for (int i = 1; i <= N; ++i) {
             float a = (float)i / (float)N * 2.0f * 3.1415926535f;
             glm::vec3 p = center + r * (u * std::cos(a) + v * std::sin(a));
-            drawLine(prev, p, color);
+
+            // Draw as tube segment (cylinder between consecutive points)
+            drawSegment(prev, p, tubeRadius, color, drawFn);
+
             prev = p;
         }
     }

@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 #include <glad/glad.h>
+#include <algorithm>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -126,15 +127,24 @@ void App::run() {
         #version 330 core
         in vec3 vColor;
         out vec4 FragColor;
+
         uniform float uAlpha;
-        void main() { FragColor = vec4(vColor, uAlpha); }
+
+        uniform bool uUseUniformColor;
+        uniform vec3 uUniformColor;
+
+        void main() {
+            vec3 col = uUseUniformColor ? uUniformColor : vColor;
+            FragColor = vec4(col, uAlpha); 
+        }
     )GLSL";
 
     Shader shader(vsSrc, fsSrc);
 
     // Geometry
-    Mesh grid = Mesh::fromVertexColorLines(makeGridVerts(10));
+    Mesh grid   = Mesh::fromVertexColorLines(makeGridVerts(10));
     Mesh sphere = Mesh::fromVertexColorTriangles(makeSphereVerts(0.05f, 24, 16));
+    Mesh unitCyl = Mesh::fromVertexColorTriangles(makeCylinderVerts(1.0f, 1.0f, 24));
 
     // Camera
     OrbitCamera camera;
@@ -147,11 +157,46 @@ void App::run() {
     static ImGuizmoLite::Gizmo gizmo;
     static bool gizmoInit = false;
 
-    std::vector<float> gizmoVerts;
+    // Optional: tune gizmo thickness/length here
+    gizmo.s.baseAxisLen        = 0.30f;
+    gizmo.s.baseAxisRadius     = 0.020f;
+    gizmo.s.baseRingTubeRadius = 0.018f;
 
-    auto drawLine = [&](const glm::vec3& a, const glm::vec3& b, const glm::vec3& c) {
-        gizmoVerts.insert(gizmoVerts.end(), {a.x,a.y,a.z, c.x,c.y,c.z});
-        gizmoVerts.insert(gizmoVerts.end(), {b.x,b.y,b.z, c.x,c.y,c.z});
+    struct GizmoCyl {
+        glm::vec3 a;
+        glm::vec3 b;
+        float r;
+        glm::vec3 c;
+    };
+    std::vector<GizmoCyl> gizmoCyls;
+
+    auto drawCylinder = [&](const glm::vec3& a,
+                            const glm::vec3& b,
+                            float radius,
+                            const glm::vec3& color)
+    {
+        gizmoCyls.push_back({a, b, radius, color});
+    };
+
+    auto cylinderModel = [&](const glm::vec3& a, const glm::vec3& b, float radius) -> glm::mat4 {
+        glm::vec3 d = b - a;
+        float len = glm::length(d);
+        if (len < 1e-6f) return glm::mat4(1.0f);
+
+        glm::vec3 z = d / len;
+        glm::vec3 up = (std::fabs(z.y) < 0.99f) ? glm::vec3(0,1,0) : glm::vec3(1,0,0);
+        glm::vec3 x = glm::normalize(glm::cross(up, z));
+        glm::vec3 y = glm::cross(z, x);
+
+        glm::mat4 R(1.0f);
+        R[0] = glm::vec4(x, 0.0f);
+        R[1] = glm::vec4(y, 0.0f);
+        R[2] = glm::vec4(z, 0.0f);
+
+        glm::mat4 S = glm::scale(glm::mat4(1.0f), glm::vec3(radius, radius, len));
+        glm::mat4 T = glm::translate(glm::mat4(1.0f), a);
+
+        return T * R * S;
     };
 
     bool rWasDown = false;
@@ -226,12 +271,15 @@ void App::run() {
         shader.setMat4("uView", view);
         shader.setMat4("uProj", proj);
 
-        // IK target from gizmo (this is what robot tries to reach)
+        // Make sure default path uses vertex colors
+        shader.setBool("uUseUniformColor", false);
+        shader.setFloat("uAlpha", 1.0f);
+
+        // IK target from gizmo
         robot.setIKTarget(gizmo.target.pos, gizmo.target.rot);
         robot.uiAndSolve();
 
         // Grid
-        shader.setFloat("uAlpha", 1.0f);
         shader.setMat4("uModel", glm::mat4(1.0f));
         grid.drawLines();
 
@@ -239,14 +287,20 @@ void App::run() {
         robot.draw(shader, sphere);
 
         // Gizmo draw AT TARGET
-        gizmoVerts.clear();
-        gizmo.draw(gizmo.target, proj, drawLine);
+        gizmoCyls.clear();
+        gizmo.draw(gizmo.target, proj, drawCylinder);
 
-        if (!gizmoVerts.empty()) {
-            Mesh gizmoMesh = Mesh::fromVertexColorLines(gizmoVerts);
-            shader.setMat4("uModel", glm::mat4(1.0f));
-            gizmoMesh.drawLines();
+        shader.setBool("uUseUniformColor", true);
+        shader.setFloat("uAlpha", 1.0f);
+
+        for (const auto& seg : gizmoCyls) {
+            shader.setVec3("uUniformColor", seg.c);
+            shader.setMat4("uModel", cylinderModel(seg.a, seg.b, seg.r));
+            unitCyl.drawTriangles();
         }
+
+        // optional reset
+        shader.setBool("uUseUniformColor", false);
 
         endFrame();
     }

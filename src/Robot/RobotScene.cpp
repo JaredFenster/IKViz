@@ -28,7 +28,7 @@ RobotScene::RobotScene(const std::string& jsonPath) {
 
     end_ = &origins_.back();
 
-    robot_->setLinkRadius(0.05f);
+    robot_->setLinkRadius(0.1f);
     robot_->setLinkSlices(18);
 
     ik_ = std::make_unique<IK>(*robot_);
@@ -100,6 +100,7 @@ void RobotScene::reset() {
 void RobotScene::uiAndSolve() {
     ImGui::Begin("IK Controls");
     ImGui::Checkbox("Enable IK", &ikEnabled_);
+    ImGui::Checkbox("Enable Origins", &OriginEnabled_);
     ImGui::SliderInt("Iterations / frame", &itersPerFrame_, 1, 30);
     ImGui::SliderFloat("Damping (lambda)", &lambda_, 0.01f, 1.0f);
     ImGui::SliderFloat("Max step (deg)", &maxStepDeg_, 0.1f, 10.0f);
@@ -158,8 +159,10 @@ void RobotScene::draw(const Shader& shader, const Mesh& sphereWire) {
 
     // Origins solid
     shader.setFloat("uAlpha", 1.0f);
-    for (const Origin& o : origins_) {
-        o.draw(shader.id(), glGetUniformLocation(shader.id(), "uModel"));
+    if(OriginEnabled_){
+        for (const Origin& o : origins_) {
+            o.draw(shader.id(), glGetUniformLocation(shader.id(), "uModel"));
+        }
     }
 }
 

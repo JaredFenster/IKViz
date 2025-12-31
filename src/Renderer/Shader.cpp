@@ -61,3 +61,14 @@ void Shader::setFloat(const char* name, float v) const {
     GLint loc = glGetUniformLocation(program_, name);
     glUniform1f(loc, v);
 }
+
+
+void Shader::setBool(const char* name, bool v) const {
+    GLint loc = glGetUniformLocation(program_, name);
+    glUniform1i(loc, v ? 1 : 0);
+}
+
+void Shader::setVec3(const char* name, const glm::vec3& v) const {
+    GLint loc = glGetUniformLocation(program_, name);
+    glUniform3f(loc, v.x, v.y, v.z);
+}

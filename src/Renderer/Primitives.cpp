@@ -2,6 +2,10 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 
+#include <algorithm>
+#include <cmath>
+#include <vector>
+
 std::vector<float> makeGridVerts(int gridHalf) {
     std::vector<float> v;
     v.reserve(((2 * gridHalf + 1) * 2 * 2 * 6));
@@ -47,14 +51,69 @@ std::vector<float> makeSphereVerts(float R, int slices, int stacks) {
             float th0 = glm::two_pi<float>() * (float)j / slices;
             float th1 = glm::two_pi<float>() * (float)(j + 1) / slices;
 
-            glm::vec3 p0(R * sin(phi0) * cos(th0), R * sin(phi0) * sin(th0), R * cos(phi0));
-            glm::vec3 p1(R * sin(phi0) * cos(th1), R * sin(phi0) * sin(th1), R * cos(phi0));
-            glm::vec3 p2(R * sin(phi1) * cos(th0), R * sin(phi1) * sin(th0), R * cos(phi1));
-            glm::vec3 p3(R * sin(phi1) * cos(th1), R * sin(phi1) * sin(th1), R * cos(phi1));
+            glm::vec3 p0(R * std::sin(phi0) * std::cos(th0), R * std::sin(phi0) * std::sin(th0), R * std::cos(phi0));
+            glm::vec3 p1(R * std::sin(phi0) * std::cos(th1), R * std::sin(phi0) * std::sin(th1), R * std::cos(phi0));
+            glm::vec3 p2(R * std::sin(phi1) * std::cos(th0), R * std::sin(phi1) * std::sin(th0), R * std::cos(phi1));
+            glm::vec3 p3(R * std::sin(phi1) * std::cos(th1), R * std::sin(phi1) * std::sin(th1), R * std::cos(phi1));
 
             push(p0.x, p0.y, p0.z); push(p2.x, p2.y, p2.z); push(p1.x, p1.y, p1.z);
             push(p1.x, p1.y, p1.z); push(p2.x, p2.y, p2.z); push(p3.x, p3.y, p3.z);
         }
     }
+    return v;
+}
+
+std::vector<float> makeCylinderVerts(float radius, float height, int segments) {
+    std::vector<float> v;
+
+    segments = std::max(segments, 3);
+
+    auto push = [&](float x, float y, float z, float r, float g, float b) {
+        v.push_back(x); v.push_back(y); v.push_back(z);
+        v.push_back(r); v.push_back(g); v.push_back(b);
+    };
+
+    // White by default (easy to tint later if you switch gizmo shader to uniform color)
+    const float cr = 1.0f, cg = 1.0f, cb = 1.0f;
+
+    const float twoPi = glm::two_pi<float>();
+
+    glm::vec3 c0(0.0f, 0.0f, 0.0f);
+    glm::vec3 c1(0.0f, 0.0f, height);
+
+    for (int i = 0; i < segments; ++i) {
+        float a0 = twoPi * (float)i / (float)segments;
+        float a1 = twoPi * (float)(i + 1) / (float)segments;
+
+        float x0 = radius * std::cos(a0);
+        float y0 = radius * std::sin(a0);
+        float x1 = radius * std::cos(a1);
+        float y1 = radius * std::sin(a1);
+
+        glm::vec3 p00(x0, y0, 0.0f);
+        glm::vec3 p01(x1, y1, 0.0f);
+        glm::vec3 p10(x0, y0, height);
+        glm::vec3 p11(x1, y1, height);
+
+        // side wall
+        push(p00.x, p00.y, p00.z, cr, cg, cb);
+        push(p10.x, p10.y, p10.z, cr, cg, cb);
+        push(p11.x, p11.y, p11.z, cr, cg, cb);
+
+        push(p00.x, p00.y, p00.z, cr, cg, cb);
+        push(p11.x, p11.y, p11.z, cr, cg, cb);
+        push(p01.x, p01.y, p01.z, cr, cg, cb);
+
+        // top cap (+Z)
+        push(c1.x, c1.y, c1.z, cr, cg, cb);
+        push(p11.x, p11.y, p11.z, cr, cg, cb);
+        push(p10.x, p10.y, p10.z, cr, cg, cb);
+
+        // bottom cap (-Z)
+        push(c0.x, c0.y, c0.z, cr, cg, cb);
+        push(p00.x, p00.y, p00.z, cr, cg, cb);
+        push(p01.x, p01.y, p01.z, cr, cg, cb);
+    }
+
     return v;
 }

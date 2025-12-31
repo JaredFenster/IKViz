@@ -35,7 +35,8 @@ private:
     Origin* end_ = nullptr;
 
     // IK params + targets
-    bool  ikEnabled_ = true;
+    bool  ikEnabled_ = false;
+    bool  OriginEnabled_ = false;
     int   itersPerFrame_ = 2;
     float lambda_ = 0.15f;
     float maxStepDeg_ = 2.0f;
