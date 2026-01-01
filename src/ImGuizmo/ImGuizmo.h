@@ -1,20 +1,6 @@
 #pragma once
 /*
   ImGuizmoLite.h (lightweight, header-only transform gizmo)
-
-  - Translation arrows (X/Y/Z)      (now drawn as cylinders if supported)
-  - Rotation rings (X/Y/Z)          (now drawn as tube segments if supported)
-  - Ray pick + drag updates a target pose
-
-  Drawing uses a user callback:
-    - Either: drawLine(p0, p1, rgb)
-    - Or:     drawCylinder(p0, p1, radius, rgb)
-
-  ORTHO SIZE FIX:
-  - Gizmo feature sizes are derived from the ORTHO projection scale, not camera->EE distance.
-  - This keeps gizmo features the same on-screen size while orbiting in orthographic view.
-
-  Dependencies: GLM
 */
 
 #include <glm/glm.hpp>
@@ -449,4 +435,4 @@ private:
     }
 };
 
-} // namespace ImGuizmoLite
+}

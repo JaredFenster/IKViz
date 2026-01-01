@@ -41,6 +41,11 @@ public:
         float rotWeight = 1.0f
     );
 
+    bool solveLinearSystem(
+        std::vector<std::vector<float>>& A,
+        std::vector<float>& b
+    ) const;
+
 private:
     linkJoint& robot_;
 
@@ -82,11 +87,7 @@ private:
         std::vector<float>& outDeltaThetaRad
     ) const;
 
-    // Generic Gauss-Jordan solver (NxN)
-    bool solveLinearSystem(
-        std::vector<std::vector<float>>& A,
-        std::vector<float>& b
-    ) const;
+    
 
     // Apply 1 joint update with limits and propagate to downstream joints
     void applyDeltaDeg(

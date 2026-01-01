@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <array>
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -19,7 +20,7 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
-#include <glm/gtx/quaternion.hpp>     // quat_cast, angleAxis
+#include <glm/gtx/quaternion.hpp>
 #include <glm/gtc/constants.hpp>
 
 #include "Renderer/Shader.h"
@@ -28,7 +29,7 @@
 #include "Camera/OrbitCamera.h"
 #include "Robot/RobotScene.h"
 #include "Robot/URDFRobot.h"
-#include "Robot/URDFMath.h"           // urdfXYZRPY
+#include "Robot/URDFMath.h"
 #include "ImGuizmo/ImGuizmo.h"
 
 static void glfw_error_callback(int error, const char* description) {
@@ -126,7 +127,7 @@ static std::string pickExistingPath(const std::string& a, const std::string& b) 
 // ---------------- URDF chain + FK helpers ----------------
 
 struct ChainInfo {
-    std::vector<int> jointIdx;  // indices into urdf.Joints()
+    std::vector<int> jointIdx;
     std::string eeLink;
 };
 
@@ -140,7 +141,7 @@ static ChainInfo buildSerialChain(const URDFRobot& urdf) {
             c.eeLink = cur;
             break;
         }
-        int jIdx = childs[0]; // serial chain: first child joint
+        int jIdx = childs[0];
         c.jointIdx.push_back(jIdx);
         cur = urdf.Joints()[jIdx].childLink;
     }
@@ -154,9 +155,6 @@ struct FKResult {
     glm::quat rot{1,0,0,0};
 };
 
-// Computes:
-// - outJointFrameWorld[k] = world transform of joint k frame (after origin, before rotation)
-// - returns EE pose (at last child link frame)
 static FKResult computeFK(
     const URDFRobot& urdf,
     const ChainInfo& chain,
@@ -193,22 +191,125 @@ static float clampf(float v, float lo, float hi) {
     return std::max(lo, std::min(hi, v));
 }
 
-static float wrapPi(float a) {
-    while (a >  glm::pi<float>()) a -= 2.0f * glm::pi<float>();
-    while (a < -glm::pi<float>()) a += 2.0f * glm::pi<float>();
-    return a;
+// --------- Small linear algebra (3x3) ---------
+
+static bool solve3x3(float A[3][3], float b[3]) {
+    for (int col = 0; col < 3; ++col) {
+        int pivot = col;
+        float best = std::fabs(A[pivot][col]);
+        for (int r = col + 1; r < 3; ++r) {
+            float v = std::fabs(A[r][col]);
+            if (v > best) { best = v; pivot = r; }
+        }
+        if (best < 1e-10f) return false;
+
+        if (pivot != col) {
+            for (int c = 0; c < 3; ++c) std::swap(A[pivot][c], A[col][c]);
+            std::swap(b[pivot], b[col]);
+        }
+
+        float diag = A[col][col];
+        for (int c = 0; c < 3; ++c) A[col][c] /= diag;
+        b[col] /= diag;
+
+        for (int r = 0; r < 3; ++r) {
+            if (r == col) continue;
+            float f = A[r][col];
+            if (std::fabs(f) < 1e-12f) continue;
+            for (int c = 0; c < 3; ++c) A[r][c] -= f * A[col][c];
+            b[r] -= f * b[col];
+        }
+    }
+    return true;
 }
 
-// -------- Pose CCD IK: position + orientation --------
-//
-// Idea per joint:
-//  - position correction: same CCD “point to target” angle about joint axis
-//  - orientation correction: take q_err = q_target * inverse(q_current)
-//      represent as axis u and angle ang, then joint can only rotate about axisW:
-//      delta_orient = ang * dot(axisW, u)
-//  - total delta = delta_pos + rotWeight * delta_orient
-//
-static bool solveIK_CCD_Pose(
+static bool invert3x3(const float M[3][3], float invOut[3][3]) {
+    for (int i = 0; i < 3; ++i) {
+        float A[3][3] = {
+            { M[0][0], M[0][1], M[0][2] },
+            { M[1][0], M[1][1], M[1][2] },
+            { M[2][0], M[2][1], M[2][2] },
+        };
+        float b[3] = { 0,0,0 };
+        b[i] = 1.0f;
+        if (!solve3x3(A, b)) return false;
+        invOut[0][i] = b[0];
+        invOut[1][i] = b[1];
+        invOut[2][i] = b[2];
+    }
+    return true;
+}
+
+static bool solveTaskDLS3(
+    const std::vector<glm::vec3>& Jcols,
+    const glm::vec3& e,
+    float lambda,
+    std::vector<float>& outDQ
+) {
+    const int n = (int)Jcols.size();
+    outDQ.assign(n, 0.0f);
+
+    float M[3][3] = { {0,0,0},{0,0,0},{0,0,0} };
+
+    for (int i = 0; i < n; ++i) {
+        const glm::vec3& Ji = Jcols[i];
+        M[0][0] += Ji.x * Ji.x; M[0][1] += Ji.x * Ji.y; M[0][2] += Ji.x * Ji.z;
+        M[1][0] += Ji.y * Ji.x; M[1][1] += Ji.y * Ji.y; M[1][2] += Ji.y * Ji.z;
+        M[2][0] += Ji.z * Ji.x; M[2][1] += Ji.z * Ji.y; M[2][2] += Ji.z * Ji.z;
+    }
+
+    const float lam2 = lambda * lambda;
+    M[0][0] += lam2; M[1][1] += lam2; M[2][2] += lam2;
+
+    float A[3][3] = {
+        { M[0][0], M[0][1], M[0][2] },
+        { M[1][0], M[1][1], M[1][2] },
+        { M[2][0], M[2][1], M[2][2] },
+    };
+    float b[3] = { e.x, e.y, e.z };
+
+    if (!solve3x3(A, b)) return false;
+
+    glm::vec3 y(b[0], b[1], b[2]);
+    for (int i = 0; i < n; ++i) outDQ[i] = glm::dot(Jcols[i], y);
+    return true;
+}
+
+static void snapshotChainAngles(const URDFRobot& urdf, const ChainInfo& chain, std::vector<float>& out) {
+    out.resize(chain.jointIdx.size());
+    for (size_t k = 0; k < chain.jointIdx.size(); ++k) {
+        const URDFJoint& j = urdf.Joints()[chain.jointIdx[k]];
+        out[k] = urdf.GetJointAngle(j.name);
+    }
+}
+
+static void restoreChainAngles(URDFRobot& urdf, const ChainInfo& chain, const std::vector<float>& snap) {
+    for (size_t k = 0; k < chain.jointIdx.size(); ++k) {
+        const URDFJoint& j = urdf.Joints()[chain.jointIdx[k]];
+        urdf.SetJointAngle(j.name, snap[k]);
+    }
+}
+
+static glm::vec3 quatErrorAxisAngleWorld(const glm::quat& qCurrentWorld,
+                                        const glm::quat& qTargetWorld,
+                                        float* outAngleMag = nullptr)
+{
+    glm::quat qErr = glm::normalize(qTargetWorld * glm::inverse(qCurrentWorld));
+    if (qErr.w < 0.0f) qErr = -qErr;
+
+    glm::vec3 v(qErr.x, qErr.y, qErr.z);
+    float s = glm::length(v);
+
+    float ang = 2.0f * std::atan2(s, clampf(qErr.w, -1.0f, 1.0f));
+    if (outAngleMag) *outAngleMag = std::fabs(ang);
+
+    if (s < 1e-8f || std::fabs(ang) < 1e-8f) return glm::vec3(0.0f);
+    glm::vec3 axis = v / s;
+    return axis * ang;
+}
+
+// -------- Best-results Pose IK: hierarchical (pos primary, rot in nullspace) --------
+static bool solveIK_HierDLS_Pose(
     URDFRobot& urdf,
     const ChainInfo& chain,
     const glm::vec3& targetPosWorld,
@@ -217,120 +318,136 @@ static bool solveIK_CCD_Pose(
     float posTolerance,
     float rotToleranceRad,
     float maxStepDeg,
-    float rotWeight
+    float rotWeight,
+    float lambda
 ) {
     if (chain.jointIdx.empty()) return false;
 
     const float maxStepRad = glm::radians(maxStepDeg);
-    bool converged = false;
+    const int n = (int)chain.jointIdx.size();
 
     std::vector<glm::mat4> jointFrames;
+    std::vector<glm::vec3> JpCols(n);
+    std::vector<glm::vec3> JrCols(n);
+
+    std::vector<float> dqPos(n, 0.0f);
+    std::vector<float> dqRot(n, 0.0f);
+    std::vector<float> dq(n, 0.0f);
+
+    float lambdaLocal = std::max(1e-6f, lambda);
 
     for (int it = 0; it < maxIterations; ++it) {
         FKResult fk = computeFK(urdf, chain, jointFrames);
 
-        float posErr = glm::length(targetPosWorld - fk.pos);
+        glm::vec3 ep = targetPosWorld - fk.pos;
+        float posErr0 = glm::length(ep);
 
-        // orientation error magnitude (angle)
-        glm::quat qerr = glm::normalize(targetRotWorld * glm::inverse(fk.rot));
-        if (qerr.w < 0.0f) qerr = -qerr; // shortest
-        float angErr = 2.0f * std::acos(clampf(qerr.w, -1.0f, 1.0f)); // [0..pi]
+        float angErr0 = 0.0f;
+        glm::vec3 er = quatErrorAxisAngleWorld(fk.rot, targetRotWorld, &angErr0);
 
-        if (posErr <= posTolerance && angErr <= rotToleranceRad) {
-            converged = true;
-            break;
-        }
+        if (posErr0 <= posTolerance && angErr0 <= rotToleranceRad) return true;
 
-        for (int k = (int)chain.jointIdx.size() - 1; k >= 0; --k) {
-            int jIdx = chain.jointIdx[k];
-            const URDFJoint& j = urdf.Joints()[jIdx];
-            if (!(j.type == JointType::Revolute || j.type == JointType::Continuous)) continue;
-
-            // recompute each joint update
-            fk = computeFK(urdf, chain, jointFrames);
-
-            glm::vec3 pEE = fk.pos;
-            glm::quat qEE = fk.rot;
-
+        glm::vec3 pEE = fk.pos;
+        for (int k = 0; k < n; ++k) {
+            const URDFJoint& j = urdf.Joints()[chain.jointIdx[k]];
             glm::vec3 pJ = glm::vec3(jointFrames[k] * glm::vec4(0,0,0,1));
             glm::vec3 axisW = glm::normalize(glm::vec3(jointFrames[k] * glm::vec4(j.axis, 0.0f)));
-            if (glm::length(axisW) < 1e-6f) continue;
 
-            // ---- position CCD delta ----
-            float deltaPos = 0.0f;
-            {
-                glm::vec3 vCur = pEE - pJ;
-                glm::vec3 vTgt = targetPosWorld - pJ;
+            if (glm::length(axisW) < 1e-6f) axisW = glm::vec3(0,0,0);
 
-                float lenCur = glm::length(vCur);
-                float lenTgt = glm::length(vTgt);
-
-                if (lenCur > 1e-6f && lenTgt > 1e-6f) {
-                    vCur /= lenCur;
-                    vTgt /= lenTgt;
-
-                    float cosang = clampf(glm::dot(vCur, vTgt), -1.0f, 1.0f);
-                    float ang = std::acos(cosang);
-
-                    glm::vec3 c = glm::cross(vCur, vTgt);
-                    float s = glm::dot(axisW, c);
-                    if (s < 0.0f) ang = -ang;
-
-                    deltaPos = ang;
-                }
-            }
-
-            // ---- orientation delta (project quaternion error axis onto joint axis) ----
-            float deltaRot = 0.0f;
-            {
-                glm::quat qerrLocal = glm::normalize(targetRotWorld * glm::inverse(qEE));
-                if (qerrLocal.w < 0.0f) qerrLocal = -qerrLocal;
-
-                float angle = 2.0f * std::acos(clampf(qerrLocal.w, -1.0f, 1.0f));
-                angle = wrapPi(angle);
-
-                float s = std::sqrt(std::max(0.0f, 1.0f - qerrLocal.w * qerrLocal.w));
-                glm::vec3 u(0,0,0);
-                if (s > 1e-6f) {
-                    u = glm::vec3(qerrLocal.x, qerrLocal.y, qerrLocal.z) / s; // world axis
-                }
-
-                // joint can only rotate about axisW
-                deltaRot = angle * glm::dot(axisW, u);
-            }
-
-            float delta = deltaPos + rotWeight * deltaRot;
-
-            // per-step clamp
-            delta = clampf(delta, -maxStepRad, maxStepRad);
-
-            float q = urdf.GetJointAngle(j.name);
-            q += delta;
-
-            if (j.type == JointType::Revolute && j.hasLimits) {
-                q = clampf(q, j.lower, j.upper);
-            }
-
-            urdf.SetJointAngle(j.name, q);
-
-            // early break if we’re good
-            fk = computeFK(urdf, chain, jointFrames);
-
-            float pe = glm::length(targetPosWorld - fk.pos);
-            glm::quat qe = glm::normalize(targetRotWorld * glm::inverse(fk.rot));
-            if (qe.w < 0.0f) qe = -qe;
-            float re = 2.0f * std::acos(clampf(qe.w, -1.0f, 1.0f));
-
-            if (pe <= posTolerance && re <= rotToleranceRad) {
-                converged = true;
-                break;
-            }
+            JpCols[k] = glm::cross(axisW, (pEE - pJ));
+            JrCols[k] = axisW;
         }
 
-        if (converged) break;
+        if (!solveTaskDLS3(JpCols, ep, lambdaLocal, dqPos)) return false;
+
+        float ramp = 0.0f;
+        {
+            float far = std::max(posTolerance * 10.0f, posTolerance + 1e-6f);
+            float t = (far - posErr0) / (far - posTolerance);
+            ramp = clampf(t, 0.0f, 1.0f);
+            ramp = ramp * ramp * (3.0f - 2.0f * ramp);
+        }
+
+        float rw = std::max(0.0f, rotWeight) * ramp;
+
+        if (rw > 0.0f) {
+            glm::vec3 erScaled = rw * er;
+            if (!solveTaskDLS3(JrCols, erScaled, lambdaLocal, dqRot)) {
+                dqRot.assign(n, 0.0f);
+            }
+        } else {
+            dqRot.assign(n, 0.0f);
+        }
+        //here
+                // --- Combine steps WITHOUT nullspace projection ---
+        // Nullspace projection often kills rotation completely near the target (no redundancy).
+        for (int i = 0; i < n; ++i) {
+            dq[i] = dqPos[i] + dqRot[i];
+        }
+
+        // Optional: if you're basically at the position target, prioritize rotation more
+        if (posErr0 <= posTolerance * 3.0f && angErr0 > rotToleranceRad) {
+            for (int i = 0; i < n; ++i) dq[i] = dqRot[i];
+        }
+        //here
+        float maxAbs = 0.0f;
+        for (int i = 0; i < n; ++i) maxAbs = std::max(maxAbs, std::fabs(dq[i]));
+        if (maxAbs > maxStepRad && maxAbs > 1e-12f) {
+            float s = maxStepRad / maxAbs;
+            for (int i = 0; i < n; ++i) dq[i] *= s;
+        }
+
+        std::vector<float> snap;
+        snapshotChainAngles(urdf, chain, snap);
+
+        float metric0 = posErr0 * posErr0 + (rw * angErr0) * (rw * angErr0);
+
+        bool accepted = false;
+        float alpha = 1.0f;
+
+        for (int ls = 0; ls < 6; ++ls) {
+            for (int k = 0; k < n; ++k) {
+                const URDFJoint& j = urdf.Joints()[chain.jointIdx[k]];
+                if (!(j.type == JointType::Revolute || j.type == JointType::Continuous)) continue;
+
+                float q = urdf.GetJointAngle(j.name);
+                q += alpha * dq[k];
+
+                if (j.type == JointType::Revolute && j.hasLimits) {
+                    q = clampf(q, j.lower, j.upper);
+                }
+                urdf.SetJointAngle(j.name, q);
+            }
+
+            FKResult fk1 = computeFK(urdf, chain, jointFrames);
+            float posErr1 = glm::length(targetPosWorld - fk1.pos);
+
+            float angErr1 = 0.0f;
+            (void)quatErrorAxisAngleWorld(fk1.rot, targetRotWorld, &angErr1);
+
+            float metric1 = posErr1 * posErr1 + (rw * angErr1) * (rw * angErr1);
+
+            float posSlack = (posErr0 <= posTolerance * 3.0f) ? (posTolerance * 2.0f) : 1e-9f;
+
+            if (metric1 < metric0 && posErr1 <= posErr0 + posSlack) {
+                accepted = true;
+                break;
+            }
+
+
+            restoreChainAngles(urdf, chain, snap);
+            alpha *= 0.5f;
+        }
+
+        if (!accepted) {
+            lambdaLocal = std::min(lambdaLocal * 2.0f, 50.0f);
+        } else {
+            lambdaLocal = std::max(lambdaLocal * 0.7f, 1e-6f);
+        }
     }
 
-    return converged;
+    return false;
 }
 
 void App::run() {
@@ -450,11 +567,12 @@ void App::run() {
     static bool ikSolveEveryFrame = false;
     static bool ikUseOrientation = true;
 
-    static int   ikMaxIter = 40;
+    static int   ikMaxIter = 60;
     static float ikPosTol = 0.002f;
-    static float ikRotTol = 0.02f;     // radians (~1.1 deg)
+    static float ikRotTol = 0.02f;
     static float ikMaxStepDeg = 6.0f;
-    static float ikRotWeight = 0.8f;
+    static float ikRotWeight = 1.0f;
+    static float ikLambda = 0.20f;
 
     while (!glfwWindowShouldClose(window_)) {
         beginFrame();
@@ -464,11 +582,22 @@ void App::run() {
         if (rDown && !rWasDown) camera.resetTarget();
         rWasDown = rDown;
 
-        double mx, my;
-        glfwGetCursorPos(window_, &mx, &my);
+        // --- cursor + sizes (DPI-safe) ---
+        double mxWin, myWin;
+        glfwGetCursorPos(window_, &mxWin, &myWin);
 
-        int w, h;
-        glfwGetFramebufferSize(window_, &w, &h);
+        int winW, winH;
+        glfwGetWindowSize(window_, &winW, &winH);
+
+        int fbW, fbH;
+        glfwGetFramebufferSize(window_, &fbW, &fbH);
+
+        float sx = (winW > 0) ? (float)fbW / (float)winW : 1.0f;
+        float sy = (winH > 0) ? (float)fbH / (float)winH : 1.0f;
+
+        // IMPORTANT: keep top-left origin (NO Y FLIP) because Gizmo.h does the flip internally
+        float mx = (float)mxWin * sx;
+        float my = (float)myWin * sy;
 
         bool lmbDown = glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
         bool lmbPressed  = (lmbDown && !prevMouseDown);
@@ -477,36 +606,40 @@ void App::run() {
 
         // init gizmo once
         if (!gizmoInit) {
-            ImGuizmoLite::Pose p;
-            p.pos = glm::vec3(0.0f);
-            p.rot = glm::quat(1,0,0,0);
-            gizmo.setTarget(p);
+            std::vector<glm::mat4> jf;
+            FKResult fk = computeFK(robot.Robot(), chain, jf);
+            gizmo.target.pos = fk.pos;
+            gizmo.target.rot = fk.rot;
             gizmoInit = true;
         }
 
-        // Update gizmo
-        ImGuizmoLite::Pose gizmoPose = gizmo.target;
-
+        // Build view/proj for this frame (used for gizmo + render)
+        glm::mat4 view = camera.view();
+        glm::mat4 proj = camera.orthoProjFromRadius(window_);
         glm::vec3 camPos = camera.getCamPos();
-        glm::vec3 camForward = glm::normalize(gizmoPose.pos - camPos);
+
+        // --- Update gizmo (THIS is the fix: do NOT copy+writeback) ---
+        glm::vec3 camForward = glm::normalize(gizmo.target.pos - camPos);
 
         gizmo.update(
-            gizmoPose,
-            camera.view(),
-            camera.orthoProjFromRadius(window_),
+            gizmo.target,   // ee == target because gizmo is anchored on target
+            view,
+            proj,
             camPos,
             camForward,
-            (float)mx, (float)my,
-            (float)w, (float)h,
+            mx, my,
+            (float)fbW, (float)fbH,
             lmbDown, lmbPressed, lmbReleased
         );
 
+        // --- Now update camera only if gizmo did NOT capture the mouse ---
         if (!gizmo.capturingMouse) {
             camera.updateFromInput(io.WantCaptureMouse);
         }
 
-        glm::mat4 view = camera.view();
-        glm::mat4 proj = camera.orthoProjFromRadius(window_);
+        // Recompute view/proj after camera move (render should match camera)
+        view = camera.view();
+        proj = camera.orthoProjFromRadius(window_);
 
         shader.use();
         shader.setMat4("uView", view);
@@ -529,7 +662,7 @@ void App::run() {
             if (ImGui::Button("Reload URDF")) loadRobot();
 
             ImGui::Separator();
-            ImGui::Text("IK (CCD Pose)");
+            ImGui::Text("IK (Hierarchical DLS Pose)");
             ImGui::Checkbox("Enable IK", &ikEnabled);
             ImGui::SameLine();
             ImGui::Checkbox("Solve every frame", &ikSolveEveryFrame);
@@ -539,7 +672,8 @@ void App::run() {
             ImGui::SliderFloat("Pos tol (m)", &ikPosTol, 0.0005f, 0.02f, "%.4f");
             ImGui::SliderFloat("Rot tol (rad)", &ikRotTol, 0.002f, 0.2f, "%.3f");
             ImGui::SliderFloat("Max step (deg)", &ikMaxStepDeg, 0.5f, 15.0f, "%.1f");
-            ImGui::SliderFloat("Rot weight", &ikRotWeight, 0.0f, 2.0f, "%.2f");
+            ImGui::SliderFloat("Rot weight", &ikRotWeight, 0.0f, 3.0f, "%.2f");
+            ImGui::SliderFloat("Damping (lambda)", &ikLambda, 0.001f, 2.0f, "%.3f");
 
             if (chainBuilt) {
                 if (ImGui::Button("Snap gizmo to EE (pos+rot)")) {
@@ -579,7 +713,7 @@ void App::run() {
             bool shouldSolve = ikSolveEveryFrame || gizmo.capturingMouse;
             if (shouldSolve) {
                 if (ikUseOrientation) {
-                    (void)solveIK_CCD_Pose(
+                    (void)solveIK_HierDLS_Pose(
                         robot.Robot(),
                         chain,
                         gizmo.target.pos,
@@ -588,11 +722,11 @@ void App::run() {
                         ikPosTol,
                         ikRotTol,
                         ikMaxStepDeg,
-                        ikRotWeight
+                        ikRotWeight,
+                        ikLambda
                     );
                 } else {
-                    // position-only fallback: pose solver with rotWeight=0
-                    (void)solveIK_CCD_Pose(
+                    (void)solveIK_HierDLS_Pose(
                         robot.Robot(),
                         chain,
                         gizmo.target.pos,
@@ -601,7 +735,8 @@ void App::run() {
                         ikPosTol,
                         999.0f,
                         ikMaxStepDeg,
-                        0.0f
+                        0.0f,
+                        ikLambda
                     );
                 }
             }

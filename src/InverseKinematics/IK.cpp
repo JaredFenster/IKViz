@@ -11,6 +11,51 @@
 #include <cmath>
 #include <algorithm>
 
+static glm::vec3 orientationErrorSmallAngleWorld(const glm::quat& qCurrentWorld,
+                                                 const glm::quat& qTargetWorld)
+{
+    // qErr rotates current -> target
+    glm::quat qErr = qTargetWorld * glm::conjugate(qCurrentWorld);
+    qErr = glm::normalize(qErr);
+
+    // shortest path
+    if (qErr.w < 0.0f) qErr = -qErr;
+
+    // small-angle: er ≈ 2 * v  (stable, no acos)
+    return 2.0f * glm::vec3(qErr.x, qErr.y, qErr.z); // radians-ish
+}
+
+static bool invert3x3_solve(const IK* self,
+                            const std::vector<std::vector<float>>& M_in,
+                            float invOut[3][3])
+{
+    // Invert by solving M x = e_i (3 times) using the existing Gauss-Jordan
+    for (int col = 0; col < 3; ++col) {
+        auto M = M_in;
+        std::vector<float> b(3, 0.0f);
+        b[col] = 1.0f;
+        if (!self->solveLinearSystem(M, b)) return false;
+        invOut[0][col] = b[0];
+        invOut[1][col] = b[1];
+        invOut[2][col] = b[2];
+    }
+    return true;
+}
+
+static void matVecMulNxN(const std::vector<std::vector<float>>& A,
+                         const std::vector<float>& x,
+                         std::vector<float>& y)
+{
+    int n = (int)x.size();
+    y.assign(n, 0.0f);
+    for (int i = 0; i < n; ++i) {
+        float sum = 0.0f;
+        for (int j = 0; j < n; ++j) sum += A[i][j] * x[j];
+        y[i] = sum;
+    }
+}
+
+
 static glm::vec3 orientationErrorAxisAngle(const glm::quat& qCurrent,
                                            const glm::quat& qTarget)
 {
@@ -352,74 +397,101 @@ bool IK::solvePose(
     if (endIdx < 0) endIdx = (int)chain.size() - 1;
     endIdx = std::max(0, std::min(endIdx, (int)chain.size() - 1));
 
-    std::vector<JCol6> Jcols;
-    std::vector<float> dThetaRad;
+    const int n = endIdx + 1;
+
+    std::vector<JCol6> J6;
+    std::vector<float> dq(n, 0.0f);
 
     float lambdaLocal = std::max(1e-6f, lambda);
-    float rw = std::max(0.0f, rotWeight);
 
     for (int iter = 0; iter < maxIterations; ++iter) {
+        // --- current errors
         const glm::vec3 pEE = chain[endIdx]->getPos();
-        const glm::vec3 ep = targetPosWorld - pEE;
+        const glm::vec3 ep  = targetPosWorld - pEE;
+        const float posErr0 = glm::length(ep);
 
-        glm::quat qEE = chain[endIdx]->getRotationQuat();
-        glm::vec3 er = orientationErrorAxisAngle(qEE, targetRotWorld);
-
-        float posErr0 = glm::length(ep);
-        float rotErr0 = glm::length(er);
+        glm::quat qEE = chain[endIdx]->getRotationQuat(); // MUST be WORLD
+        glm::vec3 er  = orientationErrorAxisAngle(qEE, targetRotWorld); // axis*angle (rad)
+        const float rotErr0 = glm::length(er);
 
         if (posErr0 < posTolerance && rotErr0 < rotToleranceRad) return true;
 
-        // combined metric for line-search acceptance
-        float metric0 = std::sqrt(posErr0 * posErr0 + (rw * rotErr0) * (rw * rotErr0));
-
-        buildJacobianPose(chain, endIdx, pEE, Jcols);
-
-        if (!solveDLS_Task6(Jcols, ep, er, lambdaLocal, rw, dThetaRad)) return false;
-
-        // Convert to degrees and globally scale
-        std::vector<float> stepDeg(endIdx + 1, 0.0f);
-        float maxAbs = 0.0f;
-        for (int i = 0; i <= endIdx; ++i) {
-            float dDeg = glm::degrees(dThetaRad[i]);
-            stepDeg[i] = dDeg;
-            maxAbs = std::max(maxAbs, std::fabs(dDeg));
+        // --- ramp orientation only when near position
+        float ramp = 0.0f;
+        {
+            float far = std::max(posTolerance * 10.0f, posTolerance + 1e-6f);
+            float t = (far - posErr0) / (far - posTolerance);
+            ramp = clampf(t, 0.0f, 1.0f);
+            ramp = ramp * ramp * (3.0f - 2.0f * ramp); // smoothstep
         }
-        if (maxAbs > maxStepDeg && maxAbs > 1e-9f) {
-            float s = maxStepDeg / maxAbs;
+        const float rw = std::max(0.0f, rotWeight) * ramp;
+
+        // --- build 6D Jacobian
+        buildJacobianPose(chain, endIdx, pEE, J6);
+
+        // --- 6D DLS solve in one shot (NO nullspace projector)
+        if (!solveDLS_Task6(J6, ep, er, lambdaLocal, rw, dq)) {
+            return false;
+        }
+
+        // --- global step scaling to maxStepDeg
+        std::vector<float> stepDeg(n, 0.0f);
+        float maxAbsDeg = 0.0f;
+        for (int i = 0; i < n; ++i) {
+            stepDeg[i] = glm::degrees(dq[i]);
+            maxAbsDeg = std::max(maxAbsDeg, std::fabs(stepDeg[i]));
+        }
+        if (maxAbsDeg > maxStepDeg && maxAbsDeg > 1e-9f) {
+            float s = maxStepDeg / maxAbsDeg;
             for (float& v : stepDeg) v *= s;
         }
 
-        // Line search
+        // --- line search: accept if metric improves (allow small pos slack near target)
         std::vector<float> snap;
         snapshotAngles(chain, endIdx, snap);
 
+        const float metric0 = posErr0 * posErr0 + (rw * rotErr0) * (rw * rotErr0);
+
         bool accepted = false;
         float alpha = 1.0f;
-        for (int ls = 0; ls < 5; ++ls) {
-            for (int i = 0; i <= endIdx; ++i) {
+
+        for (int ls = 0; ls < 6; ++ls) {
+            for (int i = 0; i < n; ++i) {
                 if (std::fabs(stepDeg[i]) > 1e-7f)
                     applyDeltaDeg(chain, i, alpha * stepDeg[i], endIdx);
             }
 
             const glm::vec3 p1 = chain[endIdx]->getPos();
-            const glm::vec3 ep1 = targetPosWorld - p1;
-            glm::quat q1 = chain[endIdx]->getRotationQuat();
-            glm::vec3 er1 = orientationErrorAxisAngle(q1, targetRotWorld);
+            const float posErr1 = glm::length(targetPosWorld - p1);
 
-            float metric1 = std::sqrt(glm::dot(ep1, ep1) + (rw * glm::length(er1)) * (rw * glm::length(er1)));
+            const glm::quat q1 = chain[endIdx]->getRotationQuat();
+            const float rotErr1 = glm::length(orientationErrorAxisAngle(q1, targetRotWorld));
 
-            if (metric1 < metric0) {
+            const float metric1 = posErr1 * posErr1 + (rw * rotErr1) * (rw * rotErr1);
+
+            float posSlack = 0.0f;
+            if (posErr0 < 10.0f * posTolerance) {
+                // We’re close enough; allow some position drift while rotating
+                posSlack = 10.0f * posTolerance;     // <-- bump this (try 10x, even 20x)
+            } else {
+                posSlack = 2.0f * posTolerance;      // still modest when far
+            }
+            
+            // hard position bound used only to prevent blowing up
+            float posBound = std::max(posErr0 + posSlack, 5.0f * posTolerance);
+            
+            if (metric1 < metric0 && posErr1 <= posBound) {
                 accepted = true;
                 break;
             }
+
 
             restoreAngles(chain, endIdx, snap);
             alpha *= 0.5f;
         }
 
         if (!accepted) {
-            lambdaLocal = std::min(lambdaLocal * 2.0f, 10.0f);
+            lambdaLocal = std::min(lambdaLocal * 2.0f, 20.0f);
         } else {
             lambdaLocal = std::max(lambdaLocal * 0.7f, 1e-6f);
         }
@@ -427,3 +499,5 @@ bool IK::solvePose(
 
     return false;
 }
+
+
