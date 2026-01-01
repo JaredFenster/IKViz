@@ -1,177 +1,69 @@
 #define GLM_ENABLE_EXPERIMENTAL
+
 #include "RobotScene.h"
-#include "../Renderer/Shader.h"
-#include "../Renderer/Mesh.h"
-#include "../Linker/origin.h"
-#include "../Linker/linkJoint.h"
-#include "../InverseKinematics/IK.h"
-#include <memory>
 
-
-#include <fstream>
-#include <iostream>
-#include <stdexcept>
-#include <nlohmann/json.hpp>
-#include <imgui.h>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
-#include <glm/gtx/euler_angles.hpp>
+#include <glm/gtx/quaternion.hpp>
 
+#include "../Renderer/Shader.h"
+#include "../Renderer/Mesh.h"
+#include "../Robot/URDFMath.h"   // for urdfXYZRPY(...)
 
-RobotScene::RobotScene(const std::string& jsonPath) {
-    loadFromJson(jsonPath);
-
-    robot_ = std::make_unique<linkJoint>(origins_.at(0));
-    for (size_t i = 1; i < origins_.size(); ++i) {
-        robot_->addJoint(origins_.at(i));
-    }
-
-    end_ = &origins_.back();
-
-    robot_->setLinkRadius(0.1f);
-    robot_->setLinkSlices(18);
-
-    ik_ = std::make_unique<IK>(*robot_);
+bool RobotScene::LoadURDF(const std::string& urdfPath, const std::string& meshesRoot) {
+    return robot_.LoadFromFile(urdfPath, meshesRoot);
 }
 
+void RobotScene::Draw(const Shader& shader) {
+    DrawLinkRecursive(robot_.RootLink(), glm::mat4(1.0f), shader);
+}
 
-void RobotScene::loadFromJson(const std::string& path) {
-    std::ifstream file(path);
-    if (!file.is_open()) throw std::runtime_error("Failed to open " + path);
+void RobotScene::DrawLinkRecursive(const std::string& linkName,
+                                   const glm::mat4& parentWorld,
+                                   const Shader& shader) {
+    const auto& links = robot_.Links();
+    auto it = links.find(linkName);
+    if (it == links.end()) return;
 
-    nlohmann::json j;
-    file >> j;
+    const URDFLink& link = it->second;
 
-    const auto& arr = j.at("origins");
-    origins_.clear();
-    origins_.reserve(arr.size());
+    // 1) Draw this link's visual mesh
+    if (link.hasVisual && link.mesh) {
+        glm::mat4 M = parentWorld;
 
-    for (const auto& o : arr) {
-        glm::vec3 pos(
-            o.at("position").at(0).get<float>(),
-            o.at("position").at(1).get<float>(),
-            o.at("position").at(2).get<float>()
-        );
+        // link visual origin (local to link frame)
+        M = M * urdfXYZRPY(link.visual.xyz, link.visual.rpy);
 
-        int xDir = o.at("xDir").get<int>();
-        int zDir = o.at("zDir").get<int>();
+        // URDF mesh scale (your files use 0.001)
+        M = glm::scale(M, link.visual.scale);
 
-        float axisLength = o.value("axisLength", 0.2f);
-        int rotateAxis   = o.value("rotateAxis", 3);
-        float angleDeg   = o.value("angleDeg", 0.0f);
-
-        float minDeg = o.value("minDeg", -180.0f);
-        float maxDeg = o.value("maxDeg",  180.0f);
-
-        if (o.contains("limits")) {
-            const auto& lim = o.at("limits");
-            minDeg = lim.value("minDeg", minDeg);
-            maxDeg = lim.value("maxDeg", maxDeg);
+        shader.setMat4("uModel", M); 
+        if (link.edgeMesh) {
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(1.0f, 1.0f);
+            link.mesh->drawTriangles();
+            glDisable(GL_POLYGON_OFFSET_FILL);
+            link.edgeMesh->drawLines();
         }
-        bool enableLimits = o.contains("limits");
 
-        origins_.emplace_back(
-            pos, xDir, zDir,
-            axisLength,
-            rotateAxis,
-            angleDeg,
-            0.02f,
-            16,
-            minDeg,
-            maxDeg,
-            enableLimits
-        );
     }
 
-    // your “pretty defaults”
-    for (auto& org : origins_) {
-        org.setAxisRadius(0.015f);
-        org.setAxisLength(0.25f);
-        org.setCylinderSlices(20);
-    }
+    // 2) Recurse into child joints
+    const auto& childJointIndices = robot_.ChildJointsOf(linkName);
+    for (int jIdx : childJointIndices) {
+        const URDFJoint& j = robot_.Joints()[jIdx];
 
-    std::cout << "origins loaded = " << origins_.size() << "\n";
-}
+        glm::mat4 childWorld = parentWorld;
 
-void RobotScene::reset() {
-    robot_->reset();
-}
+        // joint origin (from parent link frame)
+        childWorld = childWorld * urdfXYZRPY(j.originXyz, j.originRpy);
 
-void RobotScene::uiAndSolve() {
-    ImGui::Begin("IK Controls");
-    ImGui::Checkbox("Enable IK", &ikEnabled_);
-    ImGui::Checkbox("Enable Origins", &OriginEnabled_);
-    ImGui::SliderInt("Iterations / frame", &itersPerFrame_, 1, 30);
-    ImGui::SliderFloat("Damping (lambda)", &lambda_, 0.01f, 1.0f);
-    ImGui::SliderFloat("Max step (deg)", &maxStepDeg_, 0.1f, 10.0f);
-    ImGui::DragFloat3("Target Pos", &targetWorld_.x, 0.01f);
-    ImGui::DragFloat3("Target RPY (deg)", &targetEulerDeg_.x, 1.0f, -180.0f, 180.0f);
-    ImGui::SliderFloat("Rot Weight", &rotWeight_, 0.0f, 3.0f);
-
-    if (ImGui::Button("Reset Robot (K)")) reset();
-    ImGui::SameLine();
-    if (ImGui::Button("Target = End Effector") && end_) targetWorld_ = end_->getPos();
-
-    if (end_) {
-        ImGui::Text("EE: (%.3f, %.3f, %.3f)", end_->getPos().x, end_->getPos().y, end_->getPos().z);
-    }
-    ImGui::End();
-
-    if (!ikEnabled_) return;
-
-    glm::vec3 eulerRad = glm::radians(targetEulerDeg_);
-    glm::quat targetRot = glm::quat(eulerRad);
-
-    ik_->solvePose(
-        targetWorld_,
-        targetRot,
-        -1,
-        itersPerFrame_,
-        1e-3f,
-        1e-2f,
-        lambda_,
-        maxStepDeg_,
-        rotWeight_
-    );
-}
-
-void RobotScene::draw(const Shader& shader, const Mesh& sphereWire) {
-    // Update link geometry buffers (you currently rebuild every frame)
-    robot_->verts.clear();
-    robot_->addVerts();
-    robot_->setupBuffers();
-
-    // Draw target sphere (wireframe)
-    glDepthMask(GL_FALSE);
-    glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
-    glm::mat4 m(1.0f);
-    m = glm::translate(m, targetWorld_);
-    shader.setMat4("uModel", m);
-    sphereWire.drawTriangles();
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    glDepthMask(GL_TRUE);
-
-    // Links translucent
-    glDepthMask(GL_FALSE);
-    shader.setFloat("uAlpha", 0.35f);
-    robot_->link(shader.id(), glGetUniformLocation(shader.id(), "uModel"));
-    glDepthMask(GL_TRUE);
-
-    // Origins solid
-    shader.setFloat("uAlpha", 1.0f);
-    if(OriginEnabled_){
-        for (const Origin& o : origins_) {
-            o.draw(shader.id(), glGetUniformLocation(shader.id(), "uModel"));
+        // joint rotation
+        if (j.type == JointType::Revolute || j.type == JointType::Continuous) {
+            float q = robot_.GetJointAngle(j.name);
+            childWorld = childWorld * glm::rotate(glm::mat4(1.0f), q, j.axis);
         }
+
+        DrawLinkRecursive(j.childLink, childWorld, shader);
     }
-}
-
-
-void RobotScene::setIKTarget(const glm::vec3& pos, const glm::quat& rot)
-{
-    targetWorld_ = pos;
-
-    // Convert quat → Euler degrees (XYZ)
-    glm::vec3 eulerRad = glm::eulerAngles(rot);
-    targetEulerDeg_ = glm::degrees(eulerRad);
 }

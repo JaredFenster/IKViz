@@ -18,7 +18,7 @@ class IK {
 public:
     explicit IK(linkJoint& robot);
 
-    // Position-only IK (existing)
+    // Position-only IK
     bool solvePosition(
         const glm::vec3& targetWorld,
         int endEffectorIndex = -1,
@@ -44,13 +44,12 @@ public:
 private:
     linkJoint& robot_;
 
-    // Utilities
     static float clampf(float v, float lo, float hi);
 
     // Access robot chain (requires friend class IK in linkJoint)
     const std::vector<Origin*>& chain_() const;
 
-    // Position Jacobian (3×N)
+    // Build Jacobians
     void buildJacobian(
         const std::vector<Origin*>& chain,
         int endIdx,
@@ -58,7 +57,6 @@ private:
         std::vector<glm::vec3>& Jcols
     ) const;
 
-    // Pose Jacobian (6×N)
     void buildJacobianPose(
         const std::vector<Origin*>& chain,
         int endIdx,
@@ -66,15 +64,16 @@ private:
         std::vector<JCol6>& Jcols
     ) const;
 
-    // DLS solvers
-    bool solveDLS(
+    // Task-space DLS solvers (KDL-style):
+    // dq = J^T (J J^T + λ² I)^-1 e
+    bool solveDLS_Task3(
         const std::vector<glm::vec3>& Jcols,
         const glm::vec3& e,
         float lambda,
         std::vector<float>& outDeltaThetaRad
     ) const;
 
-    bool solveDLS6(
+    bool solveDLS_Task6(
         const std::vector<JCol6>& Jcols,
         const glm::vec3& ep,
         const glm::vec3& er,
@@ -83,7 +82,7 @@ private:
         std::vector<float>& outDeltaThetaRad
     ) const;
 
-    // Small linear solver (Gauss-Jordan)
+    // Generic Gauss-Jordan solver (NxN)
     bool solveLinearSystem(
         std::vector<std::vector<float>>& A,
         std::vector<float>& b
@@ -95,5 +94,18 @@ private:
         int jointIdx,
         float deltaDeg,
         int endIdx
+    ) const;
+
+    // Helpers for stable iteration
+    void snapshotAngles(
+        const std::vector<Origin*>& chain,
+        int endIdx,
+        std::vector<float>& outAnglesDeg
+    ) const;
+
+    void restoreAngles(
+        const std::vector<Origin*>& chain,
+        int endIdx,
+        const std::vector<float>& anglesDeg
     ) const;
 };

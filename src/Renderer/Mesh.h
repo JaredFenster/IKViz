@@ -18,7 +18,7 @@ public:
 
     void drawLines() const;
     void drawTriangles() const;
-
+    
 private:
     static Mesh create(const std::vector<float>& data, GLenum mode);
     void destroy();

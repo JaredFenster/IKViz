@@ -1,47 +1,21 @@
 #pragma once
-#include <string>
-#include <vector>
+#include "URDFRobot.h"
 #include <glm/glm.hpp>
-#include <glm/gtc/quaternion.hpp>
-#include <memory>
-
-
-#include "../Linker/origin.h"
-#include "../Linker/linkJoint.h"
-#include "../InverseKinematics/IK.h"
 
 class Shader;
-class Mesh;
 
 class RobotScene {
 public:
-    explicit RobotScene(const std::string& jsonPath);
+    bool LoadURDF(const std::string& urdfPath, const std::string& meshesRoot);
+    void Draw(const Shader& shader);
 
-    void reset();
-    void uiAndSolve();
-    void draw(const Shader& shader, const Mesh& sphereWire);
-    glm::vec3 eePos(){ return origins_.back().getPos(); }
-    glm::quat eeRot(){ return origins_.back().getRotationQuat(); }
-    void setIKTarget(const glm::vec3& pos, const glm::quat& rot);
-
+    // expose joint control (ImGui sliders)
+    URDFRobot& Robot() { return robot_; }
 
 private:
-    void loadFromJson(const std::string& path);
+    void DrawLinkRecursive(const std::string& linkName,
+                           const glm::mat4& parentWorld,
+                           const Shader& shader);
 
-private:
-    std::vector<Origin> origins_;
-    std::unique_ptr<linkJoint> robot_;
-    std::unique_ptr<IK> ik_;
-    Origin* end_ = nullptr;
-
-    // IK params + targets
-    bool  ikEnabled_ = false;
-    bool  OriginEnabled_ = false;
-    int   itersPerFrame_ = 2;
-    float lambda_ = 0.15f;
-    float maxStepDeg_ = 2.0f;
-    float rotWeight_ = 1.0f;
-
-    glm::vec3 targetWorld_ = glm::vec3(2.0f, 0.0f, 2.0f);
-    glm::vec3 targetEulerDeg_ = glm::vec3(0.0f);
+    URDFRobot robot_;
 };

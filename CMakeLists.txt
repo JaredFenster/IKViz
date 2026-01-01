@@ -26,6 +26,9 @@ add_executable(ArmViz
   src/Linker/origin.cpp
   src/Linker/linkJoint.cpp
   src/InverseKinematics/IK.cpp
+  src/Robot/URDFRobot.cpp
+  src/Renderer/STLLoader.cpp
+  src/Renderer/FeatureEdges.cpp
 )
 
 
@@ -54,3 +57,16 @@ target_include_directories(ArmViz PRIVATE
 if (MSVC)
   target_compile_options(ArmViz PRIVATE /W4)
 endif()
+
+
+include(FetchContent)
+
+FetchContent_Declare(
+  tinyxml2
+  GIT_REPOSITORY https://github.com/leethomason/tinyxml2.git
+  GIT_TAG 10.0.0
+)
+FetchContent_MakeAvailable(tinyxml2)
+
+target_link_libraries(${PROJECT_NAME} PRIVATE tinyxml2)
+target_include_directories(${PROJECT_NAME} PRIVATE ${tinyxml2_SOURCE_DIR})
