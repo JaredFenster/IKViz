@@ -59,7 +59,12 @@ public:
     // convenience: child joints by parent link
     const std::vector<int>& ChildJointsOf(const std::string& linkName) const;
 
+    void setPos(glm::vec3 pos) {this->pos = pos;};
+    glm::vec3 getPos() {return pos;}
+
+
 private:
+    glm::vec3 pos;
     std::string rootLink_;
     std::unordered_map<std::string, URDFLink> links_;
     std::vector<URDFJoint> joints_;

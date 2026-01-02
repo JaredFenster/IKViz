@@ -11,11 +11,11 @@ public:
 
     // expose joint control (ImGui sliders)
     URDFRobot& Robot() { return robot_; }
-
+    URDFRobot robot_;
+    
 private:
     void DrawLinkRecursive(const std::string& linkName,
                            const glm::mat4& parentWorld,
                            const Shader& shader);
 
-    URDFRobot robot_;
 };
