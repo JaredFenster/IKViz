@@ -275,6 +275,108 @@ static bool solveTaskDLS3(
     return true;
 }
 
+// -------------------------
+// Generic Gauss-Jordan (NxN)
+// -------------------------
+static bool solveLinearSystemNxN(std::vector<std::vector<float>>& A,
+                                std::vector<float>& b)
+{
+    const int n = (int)b.size();
+    if ((int)A.size() != n) return false;
+    for (int r = 0; r < n; ++r) if ((int)A[r].size() != n) return false;
+
+    for (int col = 0; col < n; ++col) {
+        int pivot = col;
+        float best = std::fabs(A[pivot][col]);
+        for (int r = col + 1; r < n; ++r) {
+            float v = std::fabs(A[r][col]);
+            if (v > best) { best = v; pivot = r; }
+        }
+        if (best < 1e-10f) return false;
+
+        if (pivot != col) {
+            std::swap(A[pivot], A[col]);
+            std::swap(b[pivot], b[col]);
+        }
+
+        const float diag = A[col][col];
+        for (int c = col; c < n; ++c) A[col][c] /= diag;
+        b[col] /= diag;
+
+        for (int r = 0; r < n; ++r) {
+            if (r == col) continue;
+            const float f = A[r][col];
+            if (std::fabs(f) < 1e-12f) continue;
+            for (int c = col; c < n; ++c) A[r][c] -= f * A[col][c];
+            b[r] -= f * b[col];
+        }
+    }
+    return true;
+}
+
+// 6D Jacobian column: [linear; angular]
+struct JCol6 {
+    glm::vec3 v;
+    glm::vec3 w;
+};
+
+// ---------------------------
+// KDL-style task-space DLS (6D)
+// dq = J^T (J J^T + λ² I)^-1 e
+// where each column is [v; rotWeight*w]
+// ---------------------------
+static bool solveTaskDLS6(
+    const std::vector<JCol6>& Jcols,
+    const glm::vec3& ep,
+    const glm::vec3& er,
+    float lambda,
+    float rotWeight,
+    std::vector<float>& outDQ
+) {
+    const int n = (int)Jcols.size();
+    outDQ.assign(n, 0.0f);
+
+    // e6 = [ep; rotWeight*er]
+    std::vector<float> e6 = {
+        ep.x, ep.y, ep.z,
+        rotWeight * er.x, rotWeight * er.y, rotWeight * er.z
+    };
+
+    // M = J J^T (6x6)
+    std::vector<std::vector<float>> M(6, std::vector<float>(6, 0.0f));
+
+    for (int i = 0; i < n; ++i) {
+        const glm::vec3 v = Jcols[i].v;
+        const glm::vec3 w = rotWeight * Jcols[i].w;
+        float Ji[6] = { v.x, v.y, v.z, w.x, w.y, w.z };
+
+        for (int r = 0; r < 6; ++r) {
+            for (int c = 0; c < 6; ++c) {
+                M[r][c] += Ji[r] * Ji[c];
+            }
+        }
+    }
+
+    const float lam2 = lambda * lambda;
+    for (int d = 0; d < 6; ++d) M[d][d] += lam2;
+
+    // Solve M y = e6  (e6 becomes y)
+    if (!solveLinearSystemNxN(M, e6)) return false;
+
+    // dq_i = Ji · y
+    for (int i = 0; i < n; ++i) {
+        const glm::vec3 v = Jcols[i].v;
+        const glm::vec3 w = rotWeight * Jcols[i].w;
+        float Ji[6] = { v.x, v.y, v.z, w.x, w.y, w.z };
+
+        float sum = 0.0f;
+        for (int k = 0; k < 6; ++k) sum += Ji[k] * e6[k];
+        outDQ[i] = sum;
+    }
+
+    return true;
+}
+
 static void snapshotChainAngles(const URDFRobot& urdf, const ChainInfo& chain, std::vector<float>& out) {
     out.resize(chain.jointIdx.size());
     for (size_t k = 0; k < chain.jointIdx.size(); ++k) {
@@ -327,14 +429,13 @@ static bool solveIK_HierDLS_Pose(
     const int n = (int)chain.jointIdx.size();
 
     std::vector<glm::mat4> jointFrames;
-    std::vector<glm::vec3> JpCols(n);
-    std::vector<glm::vec3> JrCols(n);
+    std::vector<JCol6> Jcols(n);
 
-    std::vector<float> dqPos(n, 0.0f);
-    std::vector<float> dqRot(n, 0.0f);
     std::vector<float> dq(n, 0.0f);
 
     float lambdaLocal = std::max(1e-6f, lambda);
+
+    const glm::quat qTargetN = glm::normalize(targetRotWorld);
 
     for (int it = 0; it < maxIterations; ++it) {
         FKResult fk = computeFK(urdf, chain, jointFrames);
@@ -343,24 +444,24 @@ static bool solveIK_HierDLS_Pose(
         float posErr0 = glm::length(ep);
 
         float angErr0 = 0.0f;
-        glm::vec3 er = quatErrorAxisAngleWorld(fk.rot, targetRotWorld, &angErr0);
+        glm::vec3 er = quatErrorAxisAngleWorld(glm::normalize(fk.rot), qTargetN, &angErr0);
 
         if (posErr0 <= posTolerance && angErr0 <= rotToleranceRad) return true;
 
+        // Build full 6D Jacobian columns
         glm::vec3 pEE = fk.pos;
         for (int k = 0; k < n; ++k) {
             const URDFJoint& j = urdf.Joints()[chain.jointIdx[k]];
-            glm::vec3 pJ = glm::vec3(jointFrames[k] * glm::vec4(0,0,0,1));
-            glm::vec3 axisW = glm::normalize(glm::vec3(jointFrames[k] * glm::vec4(j.axis, 0.0f)));
 
+            glm::vec3 pJ    = glm::vec3(jointFrames[k] * glm::vec4(0,0,0,1));
+            glm::vec3 axisW = glm::normalize(glm::vec3(jointFrames[k] * glm::vec4(j.axis, 0.0f)));
             if (glm::length(axisW) < 1e-6f) axisW = glm::vec3(0,0,0);
 
-            JpCols[k] = glm::cross(axisW, (pEE - pJ));
-            JrCols[k] = axisW;
+            Jcols[k].v = glm::cross(axisW, (pEE - pJ));
+            Jcols[k].w = axisW;
         }
 
-        if (!solveTaskDLS3(JpCols, ep, lambdaLocal, dqPos)) return false;
-
+        // Ramp rotation weight when far away in position
         float ramp = 0.0f;
         {
             float far = std::max(posTolerance * 10.0f, posTolerance + 1e-6f);
@@ -368,29 +469,12 @@ static bool solveIK_HierDLS_Pose(
             ramp = clampf(t, 0.0f, 1.0f);
             ramp = ramp * ramp * (3.0f - 2.0f * ramp);
         }
-
         float rw = std::max(0.0f, rotWeight) * ramp;
 
-        if (rw > 0.0f) {
-            glm::vec3 erScaled = rw * er;
-            if (!solveTaskDLS3(JrCols, erScaled, lambdaLocal, dqRot)) {
-                dqRot.assign(n, 0.0f);
-            }
-        } else {
-            dqRot.assign(n, 0.0f);
-        }
-        //here
-                // --- Combine steps WITHOUT nullspace projection ---
-        // Nullspace projection often kills rotation completely near the target (no redundancy).
-        for (int i = 0; i < n; ++i) {
-            dq[i] = dqPos[i] + dqRot[i];
-        }
+        // Solve coupled 6D DLS
+        if (!solveTaskDLS6(Jcols, ep, er, lambdaLocal, rw, dq)) return false;
 
-        // Optional: if you're basically at the position target, prioritize rotation more
-        if (posErr0 <= posTolerance * 3.0f && angErr0 > rotToleranceRad) {
-            for (int i = 0; i < n; ++i) dq[i] = dqRot[i];
-        }
-        //here
+        // Clamp step globally
         float maxAbs = 0.0f;
         for (int i = 0; i < n; ++i) maxAbs = std::max(maxAbs, std::fabs(dq[i]));
         if (maxAbs > maxStepRad && maxAbs > 1e-12f) {
@@ -398,6 +482,7 @@ static bool solveIK_HierDLS_Pose(
             for (int i = 0; i < n; ++i) dq[i] *= s;
         }
 
+        // Line search: accept if combined metric improves
         std::vector<float> snap;
         snapshotChainAngles(urdf, chain, snap);
 
@@ -424,17 +509,14 @@ static bool solveIK_HierDLS_Pose(
             float posErr1 = glm::length(targetPosWorld - fk1.pos);
 
             float angErr1 = 0.0f;
-            (void)quatErrorAxisAngleWorld(fk1.rot, targetRotWorld, &angErr1);
+            (void)quatErrorAxisAngleWorld(glm::normalize(fk1.rot), qTargetN, &angErr1);
 
             float metric1 = posErr1 * posErr1 + (rw * angErr1) * (rw * angErr1);
 
-            float posSlack = (posErr0 <= posTolerance * 3.0f) ? (posTolerance * 2.0f) : 1e-9f;
-
-            if (metric1 < metric0 && posErr1 <= posErr0 + posSlack) {
+            if (metric1 < metric0) {
                 accepted = true;
                 break;
             }
-
 
             restoreChainAngles(urdf, chain, snap);
             alpha *= 0.5f;
@@ -449,6 +531,7 @@ static bool solveIK_HierDLS_Pose(
 
     return false;
 }
+
 
 void App::run() {
     const char* vsSrc = R"GLSL(
@@ -631,6 +714,7 @@ void App::run() {
             (float)fbW, (float)fbH,
             lmbDown, lmbPressed, lmbReleased
         );
+        gizmo.target.rot = glm::normalize(gizmo.target.rot);
 
         // --- Now update camera only if gizmo did NOT capture the mouse ---
         if (!gizmo.capturingMouse) {
