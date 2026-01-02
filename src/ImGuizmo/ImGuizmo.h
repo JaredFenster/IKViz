@@ -1,12 +1,22 @@
 #pragma once
 /*
   ImGuizmoLite.h (lightweight, header-only transform gizmo)
+
+  FIXES:
+  1) Drag no longer "outruns" the mouse:
+     - Drag plane/axis/pivot are LOCKED at drag start (pivotPosStart/axisStart/planeNStart)
+     - updateDrag uses those fixed values (does NOT use ee.pos which changes while dragging)
+
+  2) Gizmo size is CONSTANT IN WORLD SPACE (not constant on screen):
+     - Removed all pixel sizing + worldPerPixel scaling
+     - Settings values are interpreted as WORLD UNITS directly
 */
 
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtx/quaternion.hpp>
 #include <cmath>
 #include <optional>
 #include <type_traits>
@@ -31,20 +41,18 @@ struct Pose {
 };
 
 struct Settings {
-    // Gizmo sizes in *ortho-radius units* (scaled by orthoRadius = 1/proj[1][1])
-    float baseAxisLen     = 0.25f;
-    float baseRingRadius  = 0.18f;
+    float axisLen        = 0.20f;  // length of translation axes
+    float ringRadius     = 0.10f;  // radius of rotation rings
 
-    // NEW: actual rendered thickness (also in ortho-radius units)
-    float baseAxisRadius     = 0.012f; // cylinder radius for axis
-    float baseRingTubeRadius = 0.010f; // cylinder radius for ring tube
+    float axisRadius     = 0.010f; // cylinder radius for axis
+    float ringTubeRadius = 0.010f; // cylinder radius for ring tube
 
-    // Pick thresholds in ortho-radius units (minimum). We also auto-expand based on radii.
-    float basePickAxisThickness = 0.03f;
-    float basePickRingThickness = 0.03f;
+    // WORLD-SPACE pick thickness
+    float pickAxisThickness = 0.03f;
+    float pickRingThickness = 0.03f;
 
-    // NEW: how much to expand pick thickness relative to rendered radius
-    float pickRadiusMultiplier = 2.0f; // pickThickness >= radius * multiplier
+    // Ensure picking is at least some multiple of rendered radius
+    float pickRadiusMultiplier = 2.0f;
 
     // drawing resolution
     int ringSegments = 64;
@@ -75,8 +83,6 @@ public:
 
     void setTarget(const Pose& p) { target = p; }
 
-    // NOTE: camPos is not needed for sizing anymore, but kept out of the signature
-    // to avoid changing your app code too much. Sizing is derived from proj.
     void update(
         const Pose& ee,
         const glm::mat4& view,
@@ -87,35 +93,30 @@ public:
         float viewportW, float viewportH,
         bool lmbDown, bool lmbPressed, bool lmbReleased
     ){
-        // Ortho-consistent sizing: orthoRadius is the half-height in world units
-        // for a standard glm::ortho(-r*aspect, r*aspect, -r, r, ...)
-        float orthoRadius = orthoRadiusFromProj(proj);
+        // WORLD-CONSTANT sizing
+        axisLenW_     = s.axisLen;
+        ringRW_       = s.ringRadius;
+        axisRadW_     = s.axisRadius;
+        ringTubeRadW_ = s.ringTubeRadius;
 
-        float axisLen      = s.baseAxisLen * orthoRadius;
-        float ringR        = s.baseRingRadius * orthoRadius;
-        float axisRad      = s.baseAxisRadius * orthoRadius;
-        float ringTubeRad  = s.baseRingTubeRadius * orthoRadius;
-
-        // Picking thickness: at least the configured base threshold, but also
-        // at least (renderRadius * multiplier) so “thicker visuals” are easier to click.
-        float pickAxisTh = std::max(s.basePickAxisThickness * orthoRadius, axisRad * s.pickRadiusMultiplier);
-        float pickRingTh = std::max(s.basePickRingThickness * orthoRadius, ringTubeRad * s.pickRadiusMultiplier);
+        pickAxisW_ = std::max(s.pickAxisThickness, axisRadW_ * s.pickRadiusMultiplier);
+        pickRingW_ = std::max(s.pickRingThickness, ringTubeRadW_ * s.pickRadiusMultiplier);
 
         Ray ray = makeMouseRayWorld(mouseX, mouseY, viewportW, viewportH, view, proj);
 
         capturingMouse = (active != Handle::None);
 
         if (active == Handle::None) {
-            hovered = hitTest(ray, ee, axisLen, ringR, pickAxisTh, pickRingTh);
+            hovered = hitTest(ray, ee, axisLenW_, ringRW_, pickAxisW_, pickRingW_);
         }
 
         if (lmbPressed && hovered != Handle::None) {
-            beginDrag(hovered, ray, ee, target, camForward, ringR);
+            beginDrag(hovered, ray, ee, target, camForward, ringRW_);
             capturingMouse = true;
         }
 
         if (active != Handle::None && lmbDown) {
-            updateDrag(ray, ee, target, ringR);
+            updateDrag(ray, ee, target, ringRW_);
             capturingMouse = true;
         }
 
@@ -125,19 +126,9 @@ public:
         }
     }
 
-    // Drawing: pass proj so sizing matches ortho exactly.
-    // DrawFn can be either:
-    //   drawLine(p0, p1, rgb)
-    //   drawCylinder(p0, p1, radius, rgb)
+    // Drawing (proj not needed for sizing anymore, kept for signature compatibility)
     template <typename DrawFn>
-    void draw(const Pose& ee, const glm::mat4& proj, DrawFn&& drawFn) const {
-        float orthoRadius = orthoRadiusFromProj(proj);
-
-        float axisLen      = s.baseAxisLen * orthoRadius;
-        float ringR        = s.baseRingRadius * orthoRadius;
-        float axisRad      = s.baseAxisRadius * orthoRadius;
-        float ringTubeRad  = s.baseRingTubeRadius * orthoRadius;
-
+    void draw(const Pose& ee, const glm::mat4& /*proj*/, DrawFn&& drawFn) const {
         glm::vec3 X = ee.rot * glm::vec3(1,0,0);
         glm::vec3 Y = ee.rot * glm::vec3(0,1,0);
         glm::vec3 Z = ee.rot * glm::vec3(0,0,1);
@@ -148,26 +139,27 @@ public:
             return axisCol;
         };
 
-        // axes (cylinders if supported)
-        drawSegment(ee.pos, ee.pos + X * axisLen, axisRad, colFor(Handle::MoveX, s.colX), drawFn);
-        drawSegment(ee.pos, ee.pos + Y * axisLen, axisRad, colFor(Handle::MoveY, s.colY), drawFn);
-        drawSegment(ee.pos, ee.pos + Z * axisLen, axisRad, colFor(Handle::MoveZ, s.colZ), drawFn);
+        // axes
+        drawSegment(ee.pos, ee.pos + X * axisLenW_, axisRadW_, colFor(Handle::MoveX, s.colX), drawFn);
+        drawSegment(ee.pos, ee.pos + Y * axisLenW_, axisRadW_, colFor(Handle::MoveY, s.colY), drawFn);
+        drawSegment(ee.pos, ee.pos + Z * axisLenW_, axisRadW_, colFor(Handle::MoveZ, s.colZ), drawFn);
 
-        // rings (tube segments if supported)
-        drawRingTube(ee.pos, X, ringR, ringTubeRad, colFor(Handle::RotX, s.ringUsesAxisColor ? s.colX : glm::vec3(1)), drawFn);
-        drawRingTube(ee.pos, Y, ringR, ringTubeRad, colFor(Handle::RotY, s.ringUsesAxisColor ? s.colY : glm::vec3(1)), drawFn);
-        drawRingTube(ee.pos, Z, ringR, ringTubeRad, colFor(Handle::RotZ, s.ringUsesAxisColor ? s.colZ : glm::vec3(1)), drawFn);
+        // rings
+        drawRingTube(ee.pos, X, ringRW_, ringTubeRadW_, colFor(Handle::RotX, s.ringUsesAxisColor ? s.colX : glm::vec3(1)), drawFn);
+        drawRingTube(ee.pos, Y, ringRW_, ringTubeRadW_, colFor(Handle::RotY, s.ringUsesAxisColor ? s.colY : glm::vec3(1)), drawFn);
+        drawRingTube(ee.pos, Z, ringRW_, ringTubeRadW_, colFor(Handle::RotZ, s.ringUsesAxisColor ? s.colZ : glm::vec3(1)), drawFn);
     }
 
 private:
-    // ----- helpers -----
+    // Cached world sizes (computed in update so draw/pick/drag match perfectly)
+    float axisLenW_     = 0.30f;
+    float ringRW_       = 0.18f;
+    float axisRadW_     = 0.020f;
+    float ringTubeRadW_ = 0.018f;
+    float pickAxisW_    = 0.03f;
+    float pickRingW_    = 0.03f;
 
-    static float orthoRadiusFromProj(const glm::mat4& proj) {
-        // For glm::ortho(..., bottom=-r, top=+r) -> proj[1][1] = 1/r
-        float yy = proj[1][1];
-        if (std::fabs(yy) < 1e-8f) return 1.0f;
-        return 1.0f / yy;
-    }
+    // ----- ray helpers -----
 
     static Ray makeMouseRayWorld(
         float mouseX, float mouseY,
@@ -275,9 +267,13 @@ private:
 private:
     // ----- drag state -----
     Pose startTarget{};
-    glm::vec3 dragPlaneN{0,1,0};
     float startAxisT = 0.0f;
     glm::vec3 startRingVec{1,0,0};
+
+    // FIX: locked pivot/axis/plane for the whole drag
+    glm::vec3 pivotPosStart{0,0,0};
+    glm::vec3 axisStart{1,0,0};
+    glm::vec3 planeNStart{0,1,0};
 
     void beginDrag(
         Handle h,
@@ -290,6 +286,9 @@ private:
         active = h;
         startTarget = currentTarget;
 
+        // LOCK pivot at drag start (do NOT follow ee.pos while dragging)
+        pivotPosStart = ee.pos;
+
         glm::vec3 X = ee.rot * glm::vec3(1,0,0);
         glm::vec3 Y = ee.rot * glm::vec3(0,1,0);
         glm::vec3 Z = ee.rot * glm::vec3(0,0,1);
@@ -300,26 +299,26 @@ private:
             return Z;
         };
 
-        glm::vec3 a = glm::normalize(axisDir(h));
+        axisStart = glm::normalize(axisDir(h));
 
         bool isMove = (h == Handle::MoveX || h == Handle::MoveY || h == Handle::MoveZ);
         if (isMove) {
-            // Plane contains axis and is as "camera-facing" as possible.
-            dragPlaneN = glm::normalize(glm::cross(a, glm::cross(camForward, a)));
+            // Plane contains axis and is as screen-facing as possible.
+            planeNStart = glm::normalize(glm::cross(axisStart, glm::cross(camForward, axisStart)));
 
             // Fallback if degenerate (camera looking nearly parallel to axis)
-            if (glm::length(dragPlaneN) < 1e-6f) {
-                glm::vec3 fallback = std::fabs(a.x) < 0.9f ? glm::vec3(1,0,0) : glm::vec3(0,1,0);
-                dragPlaneN = glm::normalize(glm::cross(a, fallback));
+            if (glm::length(planeNStart) < 1e-6f) {
+                glm::vec3 fallback = (std::fabs(axisStart.x) < 0.9f) ? glm::vec3(1,0,0) : glm::vec3(0,1,0);
+                planeNStart = glm::normalize(glm::cross(axisStart, fallback));
             }
 
-            auto q0 = rayIntersectPlanePoint(ray, ee.pos, dragPlaneN);
-            startAxisT = q0 ? glm::dot(*q0 - ee.pos, a) : 0.0f;
+            auto q0 = rayIntersectPlanePoint(ray, pivotPosStart, planeNStart);
+            startAxisT = q0 ? glm::dot(*q0 - pivotPosStart, axisStart) : 0.0f;
         } else {
             // Ring plane normal = axis
-            auto q0 = rayIntersectPlanePoint(ray, ee.pos, a);
+            auto q0 = rayIntersectPlanePoint(ray, pivotPosStart, axisStart);
             if (q0) {
-                glm::vec3 v = *q0 - ee.pos;
+                glm::vec3 v = *q0 - pivotPosStart;
                 if (glm::length(v) < 1e-6f) v = (ee.rot * glm::vec3(0,1,0)) * ringR;
                 startRingVec = glm::normalize(v);
             } else {
@@ -328,44 +327,36 @@ private:
         }
     }
 
-    void updateDrag(const Ray& ray, const Pose& ee, Pose& inOutTarget, float /*ringR*/){
+    void updateDrag(const Ray& ray, const Pose& /*ee*/, Pose& inOutTarget, float /*ringR*/){
         if (active == Handle::None) return;
-
-        glm::vec3 X = ee.rot * glm::vec3(1,0,0);
-        glm::vec3 Y = ee.rot * glm::vec3(0,1,0);
-        glm::vec3 Z = ee.rot * glm::vec3(0,0,1);
-
-        auto axisDir = [&](Handle hh)->glm::vec3{
-            if (hh == Handle::MoveX || hh == Handle::RotX) return X;
-            if (hh == Handle::MoveY || hh == Handle::RotY) return Y;
-            return Z;
-        };
-        glm::vec3 a = glm::normalize(axisDir(active));
 
         bool isMove = (active == Handle::MoveX || active == Handle::MoveY || active == Handle::MoveZ);
         if (isMove) {
-            auto q = rayIntersectPlanePoint(ray, ee.pos, dragPlaneN);
+            // Use LOCKED pivot/plane/axis
+            auto q = rayIntersectPlanePoint(ray, pivotPosStart, planeNStart);
             if (!q) return;
 
-            float t  = glm::dot(*q - ee.pos, a);
+            float t  = glm::dot(*q - pivotPosStart, axisStart);
             float dt = (t - startAxisT);
 
-            inOutTarget.pos = startTarget.pos + a * dt;
+            inOutTarget.pos = startTarget.pos + axisStart * dt;
             inOutTarget.rot = startTarget.rot;
         } else {
-            auto q = rayIntersectPlanePoint(ray, ee.pos, a);
+            // Use LOCKED pivot/axis
+            auto q = rayIntersectPlanePoint(ray, pivotPosStart, axisStart);
             if (!q) return;
 
-            glm::vec3 v = *q - ee.pos;
-            if (glm::length(v) < 1e-6f) return;
+            glm::vec3 v = *q - pivotPosStart;
+            float vlen = glm::length(v);
+            if (vlen < 1e-6f) return;
 
-            glm::vec3 v1 = glm::normalize(v);
+            glm::vec3 v1 = v / vlen;
 
-            float sgn   = glm::dot(a, glm::cross(startRingVec, v1));
+            float sgn   = glm::dot(axisStart, glm::cross(startRingVec, v1));
             float c     = glm::dot(startRingVec, v1);
             float angle = std::atan2(sgn, c);
 
-            glm::quat dq = glm::angleAxis(angle, a);
+            glm::quat dq = glm::angleAxis(angle, axisStart);
             inOutTarget.rot = glm::normalize(dq * startTarget.rot);
             inOutTarget.pos = startTarget.pos;
         }
@@ -374,8 +365,7 @@ private:
     void endDrag() { active = Handle::None; }
 
 private:
-    // ---- draw dispatch (line fallback / cylinder preferred) ----
-
+    // ---- draw dispatch ----
     template <typename Fn>
     static constexpr bool HasDrawCylinder =
         std::is_invocable_v<Fn, const glm::vec3&, const glm::vec3&, float, const glm::vec3&>;
@@ -414,7 +404,6 @@ private:
     ) const {
         glm::vec3 n = glm::normalize(normal);
 
-        // tangent basis (u,v) in ring plane
         glm::vec3 t = (std::fabs(n.x) < 0.9f) ? glm::vec3(1,0,0) : glm::vec3(0,1,0);
         glm::vec3 u = glm::normalize(glm::cross(n, t));
         glm::vec3 v = glm::normalize(glm::cross(n, u));
@@ -427,12 +416,10 @@ private:
             float a = (float)i / (float)N * 2.0f * 3.1415926535f;
             glm::vec3 p = center + r * (u * std::cos(a) + v * std::sin(a));
 
-            // Draw as tube segment (cylinder between consecutive points)
             drawSegment(prev, p, tubeRadius, color, drawFn);
-
             prev = p;
         }
     }
 };
 
-}
+} // namespace ImGuizmoLite

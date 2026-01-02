@@ -201,9 +201,6 @@ void App::run() {
     static ImGuizmoLite::Gizmo gizmo;
     static bool gizmoInit = false;
 
-    gizmo.s.baseAxisLen        = 0.30f;
-    gizmo.s.baseAxisRadius     = 0.020f;
-    gizmo.s.baseRingTubeRadius = 0.018f;
 
     struct GizmoCyl { glm::vec3 a,b; float r; glm::vec3 c; };
     std::vector<GizmoCyl> gizmoCyls;
@@ -287,14 +284,19 @@ void App::run() {
             gizmoInit = true;
         }
 
-        // Build view/proj for this frame (used for gizmo + render)
+        if (!gizmo.capturingMouse) {
+            camera.updateFromInput(io.WantCaptureMouse);
+        }
+
+        // Build view/proj AFTER camera update so gizmo math == render math
         glm::mat4 view = camera.view();
         glm::mat4 proj = camera.orthoProjFromRadius(window_);
         glm::vec3 camPos = camera.getCamPos();
 
-        // --- Update gizmo ---
-        glm::vec3 camForward = glm::normalize(gizmo.target.pos - camPos);
+        // Use actual camera forward from the view matrix (stable for ortho/persp)
+        glm::vec3 camForward = glm::normalize(-glm::vec3(view[2]));
 
+        // --- Update gizmo using the SAME matrices you'll render with ---
         gizmo.update(
             gizmo.target,   // ee == target because gizmo is anchored on target
             view,
@@ -307,18 +309,12 @@ void App::run() {
         );
         gizmo.target.rot = glm::normalize(gizmo.target.rot);
 
-        // --- Now update camera only if gizmo did NOT capture the mouse ---
-        if (!gizmo.capturingMouse) {
-            camera.updateFromInput(io.WantCaptureMouse);
-        }
-
-        // Recompute view/proj after camera move (render should match camera)
-        view = camera.view();
-        proj = camera.orthoProjFromRadius(window_);
-
+        // Then render using *these same* view/proj (DO NOT recompute later)
         shader.use();
         shader.setMat4("uView", view);
         shader.setMat4("uProj", proj);
+
+
         shader.setBool("uUseUniformColor", false);
         shader.setFloat("uAlpha", 1.0f);
 
