@@ -1,112 +1,55 @@
+// IK.h
 #pragma once
-
 #define GLM_ENABLE_EXPERIMENTAL
+
 #include <vector>
+#include <string>
+
 #include <glm/glm.hpp>
 #include <glm/gtc/quaternion.hpp>
 
-class linkJoint;
-class Origin;
+class URDFRobot;
 
-// 6D Jacobian column: [linear; angular]
-struct JCol6 {
-    glm::vec3 v; // linear
-    glm::vec3 w; // angular
+namespace URDFIK {
+
+struct ChainInfo {
+    std::vector<int> jointIdx;
+    std::string eeLink;
 };
 
-class IK {
-public:
-    explicit IK(linkJoint& robot);
-
-    // Position-only IK
-    bool solvePosition(
-        const glm::vec3& targetWorld,
-        int endEffectorIndex = -1,
-        int maxIterations = 30,
-        float tolerance = 1e-3f,
-        float lambda = 0.15f,
-        float maxStepDeg = 2.0f
-    );
-
-    // Pose IK (position + orientation)
-    bool solvePose(
-        const glm::vec3& targetPosWorld,
-        const glm::quat& targetRotWorld,
-        int endEffectorIndex = -1,
-        int maxIterations = 30,
-        float posTolerance = 1e-3f,
-        float rotToleranceRad = 1e-2f,
-        float lambda = 0.15f,
-        float maxStepDeg = 2.0f,
-        float rotWeight = 1.0f
-    );
-
-    bool solveLinearSystem(
-        std::vector<std::vector<float>>& A,
-        std::vector<float>& b
-    ) const;
-
-private:
-    linkJoint& robot_;
-
-    static float clampf(float v, float lo, float hi);
-
-    // Access robot chain (requires friend class IK in linkJoint)
-    const std::vector<Origin*>& chain_() const;
-
-    // Build Jacobians
-    void buildJacobian(
-        const std::vector<Origin*>& chain,
-        int endIdx,
-        const glm::vec3& pEE,
-        std::vector<glm::vec3>& Jcols
-    ) const;
-
-    void buildJacobianPose(
-        const std::vector<Origin*>& chain,
-        int endIdx,
-        const glm::vec3& pEE,
-        std::vector<JCol6>& Jcols
-    ) const;
-
-    // Task-space DLS solvers (KDL-style):
-    // dq = J^T (J J^T + λ² I)^-1 e
-    bool solveDLS_Task3(
-        const std::vector<glm::vec3>& Jcols,
-        const glm::vec3& e,
-        float lambda,
-        std::vector<float>& outDeltaThetaRad
-    ) const;
-
-    bool solveDLS_Task6(
-        const std::vector<JCol6>& Jcols,
-        const glm::vec3& ep,
-        const glm::vec3& er,
-        float lambda,
-        float rotWeight,
-        std::vector<float>& outDeltaThetaRad
-    ) const;
-
-    
-
-    // Apply 1 joint update with limits and propagate to downstream joints
-    void applyDeltaDeg(
-        const std::vector<Origin*>& chain,
-        int jointIdx,
-        float deltaDeg,
-        int endIdx
-    ) const;
-
-    // Helpers for stable iteration
-    void snapshotAngles(
-        const std::vector<Origin*>& chain,
-        int endIdx,
-        std::vector<float>& outAnglesDeg
-    ) const;
-
-    void restoreAngles(
-        const std::vector<Origin*>& chain,
-        int endIdx,
-        const std::vector<float>& anglesDeg
-    ) const;
+struct FKResult {
+    glm::vec3 pos{0.0f};
+    glm::quat rot{1.0f, 0.0f, 0.0f, 0.0f};
 };
+
+// Picks a simple serial chain by walking "first child joint" from RootLink() to a leaf.
+// (Same logic you had in App.cpp.)
+ChainInfo BuildSerialChain(const URDFRobot& urdf);
+
+// Computes world pose of the end effector for the provided chain.
+// Also outputs the world transform of each joint frame BEFORE applying the joint motion.
+FKResult ComputeFK(
+    const URDFRobot& urdf,
+    const ChainInfo& chain,
+    std::vector<glm::mat4>& outJointFrameWorld
+);
+
+// Coupled 6D task-space DLS pose IK (your current best solver), including:
+// - axis-angle orientation error in world
+// - rotation-weight ramp based on position error
+// - global step clamp (deg)
+// - line search + adaptive damping
+bool SolvePoseHierDLS(
+    URDFRobot& urdf,
+    const ChainInfo& chain,
+    const glm::vec3& targetPosWorld,
+    const glm::quat& targetRotWorld,
+    int   maxIterations   = 60,
+    float posTolerance    = 0.002f,
+    float rotToleranceRad = 0.02f,
+    float maxStepDeg      = 6.0f,
+    float rotWeight       = 1.0f,
+    float lambda          = 0.20f
+);
+
+} // namespace URDFIK

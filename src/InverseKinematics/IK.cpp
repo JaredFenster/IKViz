@@ -1,135 +1,31 @@
+// IK.cpp
 #define GLM_ENABLE_EXPERIMENTAL
 #include "IK.h"
-#include "../Linker/linkJoint.h"
-#include "../Linker/origin.h"
 
-#include <glm/gtc/constants.hpp>
+#include "../Robot/URDFRobot.h"
+#include "../Robot/URDFMath.h"
+
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/quaternion.hpp>
 
-#include <cmath>
 #include <algorithm>
+#include <cmath>
 
-static glm::vec3 orientationErrorAxisAngleWorld(const glm::quat& qCurrentWorld,
-                                                const glm::quat& qTargetWorld)
-{
-    glm::quat qErr = glm::normalize(qTargetWorld * glm::inverse(qCurrentWorld));
-    if (qErr.w < 0.0f) qErr = -qErr; // shortest
+namespace URDFIK {
 
-    glm::vec3 v(qErr.x, qErr.y, qErr.z);
-    float s = glm::length(v);
-    if (s < 1e-8f) return glm::vec3(0.0f);
-
-    float angle = 2.0f * std::atan2(s, glm::clamp(qErr.w, -1.0f, 1.0f)); // radians
-    glm::vec3 axis = v / s;
-    return axis * angle; // axis * angle (rad)
-}
-
-
-static bool invert3x3_solve(const IK* self,
-                            const std::vector<std::vector<float>>& M_in,
-                            float invOut[3][3])
-{
-    // Invert by solving M x = e_i (3 times) using the existing Gauss-Jordan
-    for (int col = 0; col < 3; ++col) {
-        auto M = M_in;
-        std::vector<float> b(3, 0.0f);
-        b[col] = 1.0f;
-        if (!self->solveLinearSystem(M, b)) return false;
-        invOut[0][col] = b[0];
-        invOut[1][col] = b[1];
-        invOut[2][col] = b[2];
-    }
-    return true;
-}
-
-static void matVecMulNxN(const std::vector<std::vector<float>>& A,
-                         const std::vector<float>& x,
-                         std::vector<float>& y)
-{
-    int n = (int)x.size();
-    y.assign(n, 0.0f);
-    for (int i = 0; i < n; ++i) {
-        float sum = 0.0f;
-        for (int j = 0; j < n; ++j) sum += A[i][j] * x[j];
-        y[i] = sum;
-    }
-}
-
-
-static glm::vec3 orientationErrorAxisAngle(const glm::quat& qCurrent,
-                                           const glm::quat& qTarget)
-{
-    // error that rotates current -> target
-    glm::quat qErr = qTarget * glm::conjugate(qCurrent);
-    qErr = glm::normalize(qErr);
-
-    // Keep shortest rotation
-    if (qErr.w < 0.0f) qErr = -qErr;
-
-    float w = glm::clamp(qErr.w, -1.0f, 1.0f);
-    float angle = 2.0f * std::acos(w);          // [0, pi]
-    float s = std::sqrt(std::max(0.0f, 1.0f - w*w));
-
-    if (s < 1e-8f || angle < 1e-8f) {
-        return glm::vec3(0.0f);
-    }
-
-    glm::vec3 axis(qErr.x / s, qErr.y / s, qErr.z / s);
-    return axis * angle; // radians
-}
-
-float IK::clampf(float v, float lo, float hi) {
+static float clampf(float v, float lo, float hi) {
     return std::max(lo, std::min(hi, v));
 }
 
-IK::IK(linkJoint& robot) : robot_(robot) {}
-
-const std::vector<Origin*>& IK::chain_() const {
-    // Requires: friend class IK; in linkJoint
-    return robot_.robot;
-}
-
-void IK::buildJacobian(
-    const std::vector<Origin*>& chain,
-    int endIdx,
-    const glm::vec3& pEE,
-    std::vector<glm::vec3>& Jcols
-) const {
-    const int n = endIdx + 1;
-    Jcols.assign(n, glm::vec3(0.0f));
-
-    for (int i = 0; i < n; ++i) {
-        const glm::vec3 pi = chain[i]->getPos();
-        const glm::vec3 wi = glm::normalize(chain[i]->getJointAxisWorld());
-        Jcols[i] = glm::cross(wi, (pEE - pi));
-    }
-}
-
-void IK::buildJacobianPose(
-    const std::vector<Origin*>& chain,
-    int endIdx,
-    const glm::vec3& pEE,
-    std::vector<JCol6>& Jcols
-) const {
-    const int n = endIdx + 1;
-    Jcols.assign(n, {glm::vec3(0), glm::vec3(0)});
-
-    for (int i = 0; i < n; ++i) {
-        const glm::vec3 pi = chain[i]->getPos();
-        const glm::vec3 wi = glm::normalize(chain[i]->getJointAxisWorld());
-        Jcols[i].v = glm::cross(wi, (pEE - pi));
-        Jcols[i].w = wi;
-    }
-}
-
-bool IK::solveLinearSystem(
-    std::vector<std::vector<float>>& A,
-    std::vector<float>& b
-) const {
+// -------------------------
+// Generic Gauss-Jordan (NxN)
+// -------------------------
+static bool solveLinearSystemNxN(std::vector<std::vector<float>>& A,
+                                std::vector<float>& b)
+{
     const int n = (int)b.size();
     if ((int)A.size() != n) return false;
+    for (int r = 0; r < n; ++r) if ((int)A[r].size() != n) return false;
 
     for (int col = 0; col < n; ++col) {
         int pivot = col;
@@ -160,74 +56,40 @@ bool IK::solveLinearSystem(
     return true;
 }
 
-// ---------------------------
-// KDL-style task-space DLS (3D)
-// dq = J^T (J J^T + λ² I)^-1 e
-// ---------------------------
-bool IK::solveDLS_Task3(
-    const std::vector<glm::vec3>& Jcols,
-    const glm::vec3& e,
-    float lambda,
-    std::vector<float>& outDeltaThetaRad
-) const {
-    const int n = (int)Jcols.size();
-    outDeltaThetaRad.assign(n, 0.0f);
-
-    // M = J J^T (3x3)
-    std::vector<std::vector<float>> M(3, std::vector<float>(3, 0.0f));
-
-    for (int i = 0; i < n; ++i) {
-        const glm::vec3& Ji = Jcols[i];
-        M[0][0] += Ji.x * Ji.x; M[0][1] += Ji.x * Ji.y; M[0][2] += Ji.x * Ji.z;
-        M[1][0] += Ji.y * Ji.x; M[1][1] += Ji.y * Ji.y; M[1][2] += Ji.y * Ji.z;
-        M[2][0] += Ji.z * Ji.x; M[2][1] += Ji.z * Ji.y; M[2][2] += Ji.z * Ji.z;
-    }
-
-    const float lam2 = lambda * lambda;
-    M[0][0] += lam2; M[1][1] += lam2; M[2][2] += lam2;
-
-    std::vector<float> b = { e.x, e.y, e.z };   // solve for y
-    if (!solveLinearSystem(M, b)) return false; // b becomes y
-
-    const glm::vec3 y(b[0], b[1], b[2]);
-
-    // dq = J^T y  (dq_i = Ji · y)
-    for (int i = 0; i < n; ++i) {
-        outDeltaThetaRad[i] = glm::dot(Jcols[i], y);
-    }
-
-    return true;
-}
+// 6D Jacobian column: [linear; angular]
+struct JCol6 {
+    glm::vec3 v;
+    glm::vec3 w;
+};
 
 // ---------------------------
 // KDL-style task-space DLS (6D)
 // dq = J^T (J J^T + λ² I)^-1 e
-// with row-scaling for rotation weight
+// where each column is [v; rotWeight*w]
 // ---------------------------
-bool IK::solveDLS_Task6(
+static bool solveTaskDLS6(
     const std::vector<JCol6>& Jcols,
     const glm::vec3& ep,
     const glm::vec3& er,
     float lambda,
     float rotWeight,
-    std::vector<float>& outDeltaThetaRad
-) const {
+    std::vector<float>& outDQ
+) {
     const int n = (int)Jcols.size();
-    outDeltaThetaRad.assign(n, 0.0f);
+    outDQ.assign(n, 0.0f);
 
-    // Build e6 = [ep; rotWeight*er]
+    // e6 = [ep; rotWeight*er]
     std::vector<float> e6 = {
         ep.x, ep.y, ep.z,
         rotWeight * er.x, rotWeight * er.y, rotWeight * er.z
     };
 
-    // M = J J^T (6x6), where each column is [v; rotWeight*w]
+    // M = J J^T (6x6)
     std::vector<std::vector<float>> M(6, std::vector<float>(6, 0.0f));
 
     for (int i = 0; i < n; ++i) {
         const glm::vec3 v = Jcols[i].v;
         const glm::vec3 w = rotWeight * Jcols[i].w;
-
         float Ji[6] = { v.x, v.y, v.z, w.x, w.y, w.z };
 
         for (int r = 0; r < 6; ++r) {
@@ -240,7 +102,8 @@ bool IK::solveDLS_Task6(
     const float lam2 = lambda * lambda;
     for (int d = 0; d < 6; ++d) M[d][d] += lam2;
 
-    if (!solveLinearSystem(M, e6)) return false; // e6 becomes y
+    // Solve M y = e6  (e6 becomes y)
+    if (!solveLinearSystemNxN(M, e6)) return false;
 
     // dq_i = Ji · y
     for (int i = 0; i < n; ++i) {
@@ -250,226 +113,205 @@ bool IK::solveDLS_Task6(
 
         float sum = 0.0f;
         for (int k = 0; k < 6; ++k) sum += Ji[k] * e6[k];
-        outDeltaThetaRad[i] = sum;
+        outDQ[i] = sum;
     }
 
     return true;
 }
 
-void IK::applyDeltaDeg(
-    const std::vector<Origin*>& chain,
-    int jointIdx,
-    float deltaDeg,
-    int endIdx
-) const {
-    Origin* pivot = chain[jointIdx];
-    const int pivotAxisInt = pivot->getRotateAxisInt();
-
-    const float current = pivot->getAngleDeg();
-    const float desired = current + deltaDeg;
-
-    const float clamped = pivot->clampToLimits(desired);
-    const float applied = clamped - current;
-
-    if (std::fabs(applied) < 1e-9f) return;
-
-    pivot->setAngleDeg(clamped);
-
-    for (int k = jointIdx + 1; k <= endIdx; ++k) {
-        chain[k]->rotateAboutOtherOriginAxis(*pivot, pivotAxisInt, applied, true);
+static void snapshotChainAngles(const URDFRobot& urdf, const ChainInfo& chain, std::vector<float>& out) {
+    out.resize(chain.jointIdx.size());
+    for (size_t k = 0; k < chain.jointIdx.size(); ++k) {
+        const URDFJoint& j = urdf.Joints()[chain.jointIdx[k]];
+        out[k] = urdf.GetJointAngle(j.name);
     }
 }
 
-void IK::snapshotAngles(
-    const std::vector<Origin*>& chain,
-    int endIdx,
-    std::vector<float>& outAnglesDeg
-) const {
-    outAnglesDeg.resize(endIdx + 1);
-    for (int i = 0; i <= endIdx; ++i) outAnglesDeg[i] = chain[i]->getAngleDeg();
+static void restoreChainAngles(URDFRobot& urdf, const ChainInfo& chain, const std::vector<float>& snap) {
+    for (size_t k = 0; k < chain.jointIdx.size(); ++k) {
+        const URDFJoint& j = urdf.Joints()[chain.jointIdx[k]];
+        urdf.SetJointAngle(j.name, snap[k]);
+    }
 }
 
-void IK::restoreAngles(
-    const std::vector<Origin*>& chain,
-    int endIdx,
-    const std::vector<float>& anglesDeg
-) const {
-    for (int i = 0; i <= endIdx; ++i) {
-        float cur = chain[i]->getAngleDeg();
-        float back = anglesDeg[i] - cur;
-        if (std::fabs(back) > 1e-9f) {
-            applyDeltaDeg(chain, i, back, endIdx);
+static glm::vec3 quatErrorAxisAngleWorld(const glm::quat& qCurrentWorld,
+                                        const glm::quat& qTargetWorld,
+                                        float* outAngleMag = nullptr)
+{
+    glm::quat qErr = glm::normalize(qTargetWorld * glm::inverse(qCurrentWorld));
+    if (qErr.w < 0.0f) qErr = -qErr;
+
+    glm::vec3 v(qErr.x, qErr.y, qErr.z);
+    float s = glm::length(v);
+
+    float ang = 2.0f * std::atan2(s, clampf(qErr.w, -1.0f, 1.0f));
+    if (outAngleMag) *outAngleMag = std::fabs(ang);
+
+    if (s < 1e-8f || std::fabs(ang) < 1e-8f) return glm::vec3(0.0f);
+    glm::vec3 axis = v / s;
+    return axis * ang; // radians (world)
+}
+
+// ------------------- Public API -------------------
+
+ChainInfo BuildSerialChain(const URDFRobot& urdf) {
+    ChainInfo c;
+    std::string cur = urdf.RootLink();
+
+    for (int safety = 0; safety < 64; ++safety) {
+        const auto& childs = urdf.ChildJointsOf(cur);
+        if (childs.empty()) {
+            c.eeLink = cur;
+            break;
         }
+        int jIdx = childs[0];
+        c.jointIdx.push_back(jIdx);
+        cur = urdf.Joints()[jIdx].childLink;
     }
+
+    if (c.eeLink.empty()) c.eeLink = cur;
+    return c;
 }
 
-bool IK::solvePosition(
-    const glm::vec3& targetWorld,
-    int endEffectorIndex,
-    int maxIterations,
-    float tolerance,
-    float lambda,
-    float maxStepDeg
+FKResult ComputeFK(
+    const URDFRobot& urdf,
+    const ChainInfo& chain,
+    std::vector<glm::mat4>& outJointFrameWorld
 ) {
-    const auto& chain = chain_();
-    if (chain.empty()) return false;
+    outJointFrameWorld.clear();
+    outJointFrameWorld.reserve(chain.jointIdx.size());
 
-    int endIdx = endEffectorIndex;
-    if (endIdx < 0) endIdx = (int)chain.size() - 1;
-    endIdx = std::max(0, std::min(endIdx, (int)chain.size() - 1));
+    glm::mat4 T = glm::mat4(1.0f);
 
-    std::vector<glm::vec3> Jcols;
-    std::vector<float> dThetaRad;
+    for (int idx : chain.jointIdx) {
+        const URDFJoint& j = urdf.Joints()[idx];
 
-    float lambdaLocal = std::max(1e-6f, lambda);
+        glm::mat4 T_origin = urdfXYZRPY(j.originXyz, j.originRpy);
 
-    for (int iter = 0; iter < maxIterations; ++iter) {
-        const glm::vec3 pEE = chain[endIdx]->getPos();
-        const glm::vec3 e = targetWorld - pEE;
-        float err0 = glm::length(e);
+        glm::mat4 T_jointFrame = T * T_origin;
+        outJointFrameWorld.push_back(T_jointFrame);
 
-        if (err0 < tolerance) return true;
-
-        buildJacobian(chain, endIdx, pEE, Jcols);
-        if (!solveDLS_Task3(Jcols, e, lambdaLocal, dThetaRad)) return false;
-
-        // Convert to degrees and globally scale step so the largest joint step is maxStepDeg
-        std::vector<float> stepDeg(endIdx + 1, 0.0f);
-        float maxAbs = 0.0f;
-        for (int i = 0; i <= endIdx; ++i) {
-            float dDeg = glm::degrees(dThetaRad[i]);
-            stepDeg[i] = dDeg;
-            maxAbs = std::max(maxAbs, std::fabs(dDeg));
-        }
-        if (maxAbs > maxStepDeg && maxAbs > 1e-9f) {
-            float s = maxStepDeg / maxAbs;
-            for (float& v : stepDeg) v *= s;
-        }
-
-        // Line search: only accept steps that reduce error
-        std::vector<float> snap;
-        snapshotAngles(chain, endIdx, snap);
-
-        bool accepted = false;
-        float alpha = 1.0f;
-        for (int ls = 0; ls < 5; ++ls) {
-            for (int i = 0; i <= endIdx; ++i) {
-                if (std::fabs(stepDeg[i]) > 1e-7f)
-                    applyDeltaDeg(chain, i, alpha * stepDeg[i], endIdx);
-            }
-
-            float err1 = glm::length(targetWorld - chain[endIdx]->getPos());
-            if (err1 < err0) {
-                accepted = true;
-                break;
-            }
-
-            // revert and try smaller step
-            restoreAngles(chain, endIdx, snap);
-            alpha *= 0.5f;
-        }
-
-        if (!accepted) {
-            // stuck / oscillating -> increase damping (more stable, smaller effective steps)
-            lambdaLocal = std::min(lambdaLocal * 2.0f, 10.0f);
+        float q = urdf.GetJointAngle(j.name);
+        if (j.type == JointType::Revolute || j.type == JointType::Continuous) {
+            T = T_jointFrame * glm::rotate(glm::mat4(1.0f), q, j.axis);
         } else {
-            // converging -> reduce damping for speed
-            lambdaLocal = std::max(lambdaLocal * 0.7f, 1e-6f);
+            T = T_jointFrame;
         }
     }
 
-    return false;
+    FKResult out;
+    out.pos = glm::vec3(T * glm::vec4(0,0,0,1));
+    out.rot = glm::normalize(glm::quat_cast(glm::mat3(T)));
+    return out;
 }
 
-bool IK::solvePose(
+bool SolvePoseHierDLS(
+    URDFRobot& urdf,
+    const ChainInfo& chain,
     const glm::vec3& targetPosWorld,
     const glm::quat& targetRotWorld,
-    int endEffectorIndex,
     int maxIterations,
     float posTolerance,
     float rotToleranceRad,
-    float lambda,
     float maxStepDeg,
-    float rotWeight
+    float rotWeight,
+    float lambda
 ) {
-    const auto& chain = chain_();
-    if (chain.empty()) return false;
+    if (chain.jointIdx.empty()) return false;
 
-    int endIdx = endEffectorIndex;
-    if (endIdx < 0) endIdx = (int)chain.size() - 1;
-    endIdx = std::max(0, std::min(endIdx, (int)chain.size() - 1));
-    const int n = endIdx + 1;
+    const float maxStepRad = glm::radians(maxStepDeg);
+    const int n = (int)chain.jointIdx.size();
 
-    std::vector<JCol6> Jcols6;
-    std::vector<float> dqRad;
+    std::vector<glm::mat4> jointFrames;
+    std::vector<JCol6> Jcols(n);
+
+    std::vector<float> dq(n, 0.0f);
 
     float lambdaLocal = std::max(1e-6f, lambda);
+    const glm::quat qTargetN = glm::normalize(targetRotWorld);
 
-    for (int iter = 0; iter < maxIterations; ++iter) {
-        const glm::vec3 pEE = chain[endIdx]->getPos();
-        const glm::vec3 ep  = targetPosWorld - pEE;
-        const float posErr0 = glm::length(ep);
+    for (int it = 0; it < maxIterations; ++it) {
+        FKResult fk = ComputeFK(urdf, chain, jointFrames);
 
-        glm::quat qEE = glm::normalize(chain[endIdx]->getRotationQuat()); // MUST be world
-        glm::vec3 er  = orientationErrorAxisAngleWorld(qEE, glm::normalize(targetRotWorld));
-        const float rotErr0 = glm::length(er);
+        glm::vec3 ep = targetPosWorld - fk.pos;
+        float posErr0 = glm::length(ep);
 
-        if (posErr0 < posTolerance && rotErr0 < rotToleranceRad) return true;
+        float angErr0 = 0.0f;
+        glm::vec3 er = quatErrorAxisAngleWorld(glm::normalize(fk.rot), qTargetN, &angErr0);
 
-        // Build 6D Jacobian columns [v; w]
-        buildJacobianPose(chain, endIdx, pEE, Jcols6);
+        if (posErr0 <= posTolerance && angErr0 <= rotToleranceRad) return true;
 
-        // Optional ramp: only reduce rotation weight when we're far in position
-        float rw = std::max(0.0f, rotWeight);
-        if (posErr0 > 10.0f * posTolerance) {
-            float t = (10.0f * posTolerance) / std::max(posErr0, 1e-6f);
-            rw *= glm::clamp(t, 0.0f, 1.0f);
+        // Build full 6D Jacobian columns
+        glm::vec3 pEE = fk.pos;
+        for (int k = 0; k < n; ++k) {
+            const URDFJoint& j = urdf.Joints()[chain.jointIdx[k]];
+
+            glm::vec3 pJ    = glm::vec3(jointFrames[k] * glm::vec4(0,0,0,1));
+            glm::vec3 axisW = glm::normalize(glm::vec3(jointFrames[k] * glm::vec4(j.axis, 0.0f)));
+            if (glm::length(axisW) < 1e-6f) axisW = glm::vec3(0,0,0);
+
+            Jcols[k].v = glm::cross(axisW, (pEE - pJ));
+            Jcols[k].w = axisW;
         }
 
-        if (!solveDLS_Task6(Jcols6, ep, er, lambdaLocal, rw, dqRad)) {
-            return false;
+        // Ramp rotation weight when far away in position
+        float ramp = 0.0f;
+        {
+            float far = std::max(posTolerance * 10.0f, posTolerance + 1e-6f);
+            float t = (far - posErr0) / (far - posTolerance);
+            ramp = clampf(t, 0.0f, 1.0f);
+            ramp = ramp * ramp * (3.0f - 2.0f * ramp);
         }
+        float rw = std::max(0.0f, rotWeight) * ramp;
 
-        // Convert to degrees and clamp globally
-        std::vector<float> stepDeg(n, 0.0f);
+        // Solve coupled 6D DLS
+        if (!solveTaskDLS6(Jcols, ep, er, lambdaLocal, rw, dq)) return false;
+
+        // Clamp step globally
         float maxAbs = 0.0f;
-        for (int i = 0; i < n; ++i) {
-            stepDeg[i] = glm::degrees(dqRad[i]);
-            maxAbs = std::max(maxAbs, std::fabs(stepDeg[i]));
-        }
-        if (maxAbs > maxStepDeg && maxAbs > 1e-9f) {
-            float s = maxStepDeg / maxAbs;
-            for (float& v : stepDeg) v *= s;
+        for (int i = 0; i < n; ++i) maxAbs = std::max(maxAbs, std::fabs(dq[i]));
+        if (maxAbs > maxStepRad && maxAbs > 1e-12f) {
+            float s = maxStepRad / maxAbs;
+            for (int i = 0; i < n; ++i) dq[i] *= s;
         }
 
-        // Line search: accept if the combined metric improves.
+        // Line search: accept if combined metric improves
         std::vector<float> snap;
-        snapshotAngles(chain, endIdx, snap);
+        snapshotChainAngles(urdf, chain, snap);
 
-        float metric0 = posErr0 * posErr0 + (rw * rotErr0) * (rw * rotErr0);
+        float metric0 = posErr0 * posErr0 + (rw * angErr0) * (rw * angErr0);
 
         bool accepted = false;
         float alpha = 1.0f;
+
         for (int ls = 0; ls < 6; ++ls) {
-            for (int i = 0; i < n; ++i) {
-                if (std::fabs(stepDeg[i]) > 1e-7f)
-                    applyDeltaDeg(chain, i, alpha * stepDeg[i], endIdx);
+            for (int k = 0; k < n; ++k) {
+                const URDFJoint& j = urdf.Joints()[chain.jointIdx[k]];
+                if (!(j.type == JointType::Revolute || j.type == JointType::Continuous)) continue;
+
+                float q = urdf.GetJointAngle(j.name);
+                q += alpha * dq[k];
+
+                if (j.type == JointType::Revolute && j.hasLimits) {
+                    q = clampf(q, j.lower, j.upper);
+                }
+                urdf.SetJointAngle(j.name, q);
             }
 
-            const glm::vec3 p1 = chain[endIdx]->getPos();
-            const float posErr1 = glm::length(targetPosWorld - p1);
+            FKResult fk1 = ComputeFK(urdf, chain, jointFrames);
+            float posErr1 = glm::length(targetPosWorld - fk1.pos);
 
-            glm::quat q1 = glm::normalize(chain[endIdx]->getRotationQuat());
-            const float rotErr1 = glm::length(orientationErrorAxisAngleWorld(q1, glm::normalize(targetRotWorld)));
+            float angErr1 = 0.0f;
+            (void)quatErrorAxisAngleWorld(glm::normalize(fk1.rot), qTargetN, &angErr1);
 
-            float metric1 = posErr1 * posErr1 + (rw * rotErr1) * (rw * rotErr1);
+            float metric1 = posErr1 * posErr1 + (rw * angErr1) * (rw * angErr1);
 
             if (metric1 < metric0) {
                 accepted = true;
                 break;
             }
 
-            restoreAngles(chain, endIdx, snap);
+            restoreChainAngles(urdf, chain, snap);
             alpha *= 0.5f;
         }
 
@@ -483,5 +325,4 @@ bool IK::solvePose(
     return false;
 }
 
-
-
+} // namespace URDFIK
