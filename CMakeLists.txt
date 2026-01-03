@@ -45,6 +45,8 @@ target_link_libraries(ArmViz PRIVATE
 # vcpkg installs backend sources in the include directory.
 get_target_property(IMGUI_INCLUDE_DIR imgui::imgui INTERFACE_INCLUDE_DIRECTORIES)
 
+target_compile_definitions(ArmViz PRIVATE GLM_ENABLE_EXPERIMENTAL)
+
 # INTERFACE_INCLUDE_DIRECTORIES can be a list; grab the first entry.
 list(GET IMGUI_INCLUDE_DIR 0 IMGUI_INC0)
 

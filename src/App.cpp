@@ -288,6 +288,13 @@ void App::run() {
     // Optional: how many trajectory points to advance per frame (speed)
     static int jogStride = 1;
 
+    // Jog settings
+    static bool jogInterpRotation = true;
+
+    // Frozen jog endpoints (so moving the gizmo mid-jog doesn't change the goal)
+    static glm::vec3 jogEndPos(0.0f);
+    static glm::quat jogEndRot(1,0,0,0);
+
     while (!glfwWindowShouldClose(window_)) {
         beginFrame();
         ImGuiIO& io = ImGui::GetIO();
@@ -401,6 +408,7 @@ void App::run() {
             ImGui::Text("Jog:");
             ImGui::SliderInt("Jog Density", &density, 100, 5000);
             ImGui::SliderInt("Jog Stride (pts/frame)", &jogStride, 1, 50);
+            ImGui::Checkbox("Interpolate Rotation (slerp)", &jogInterpRotation);
 
             if (chainBuiltA) {
                 if (ImGui::Button("Snap gizmo to robotA EE (pos+rot)")) {
@@ -420,19 +428,32 @@ void App::run() {
             ImGui::Separator();
             ImGui::Text("Joints (radians) [editing robotA]:");
 
-            // Start jog: generate trajectory from robotB EE -> gizmo target
+            // Start jog: generate trajectory from robotB EE -> gizmo target (pos + rot)
             if (ImGui::Button("JOG ROBOT") && !jogging) {
                 if (robotLoadedB && chainBuiltB) {
                     jogging = true;
                     jogIndex = 0;
 
+                    // freeze endpoint at the moment jog begins
+                    jogEndPos = gizmo.target.pos;
+                    jogEndRot = gizmo.target.rot;
+
                     std::vector<glm::mat4> jfB;
                     URDFIK::FKResult fkB = URDFIK::ComputeFK(robotB.Robot(), chainB, jfB);
 
-                    traj.GeneratePoints(fkB.pos, gizmo.target.pos, density);
-
-                    std::cout << "Jog Started\n";
-                    std::cout << traj.getNumPoints() << " Points Generated\n";
+                    if (jogInterpRotation) {
+                        traj.GeneratePoses(
+                            fkB.pos, fkB.rot,
+                            jogEndPos, jogEndRot,
+                            density
+                        );
+                        std::cout << "Jog Started (pos+rot)\n";
+                        std::cout << traj.getNumPoses() << " Poses Generated\n";
+                    } else {
+                        traj.GeneratePoints(fkB.pos, jogEndPos, density);
+                        std::cout << "Jog Started (pos only)\n";
+                        std::cout << traj.getNumPoints() << " Points Generated\n";
+                    }
                 }
             }
 
@@ -491,32 +512,65 @@ void App::run() {
 
         // ---- Jog solve (robotB only, using chainB) ----
         if (jogging) {
-            const int n = traj.getNumPoints();
-            if (!robotLoadedB || !chainBuiltB || !ikEnabled || n < 2) {
+            if (!robotLoadedB || !chainBuiltB || !ikEnabled) {
                 jogging = false;
                 jogIndex = 0;
             } else {
-                // clamp index
-                jogIndex = std::clamp(jogIndex, 0, n - 1);
+                if (jogInterpRotation) {
+                    const int n = traj.getNumPoses();
+                    if (n < 2) {
+                        jogging = false;
+                        jogIndex = 0;
+                    } else {
+                        jogIndex = std::clamp(jogIndex, 0, n - 1);
 
-                // target point
-                glm::vec3 jogPos = traj.getPoint(jogIndex);
+                        glm::vec3 jogPos = traj.getPos(jogIndex);
+                        glm::quat jogRot = traj.getRot(jogIndex);
 
-                // Solve robotB to this point (keep orientation as gizmo target)
-                (void)URDFIK::SolvePoseHierDLS(
-                    robotB.Robot(), chainB,
-                    jogPos, gizmo.target.rot,
-                    ikMaxIter, ikPosTol, ikRotTol,
-                    ikMaxStepDeg, ikRotWeight, ikLambda
-                );
+                        // If user disabled orientation globally, still jog position only.
+                        float rotTolUse = ikUseOrientation ? ikRotTol : 999.0f;
+                        float rotWUse   = ikUseOrientation ? ikRotWeight : 0.0f;
 
-                // advance (speed control)
-                jogIndex += std::max(1, jogStride);
+                        (void)URDFIK::SolvePoseHierDLS(
+                            robotB.Robot(), chainB,
+                            jogPos, jogRot,
+                            ikMaxIter, ikPosTol, rotTolUse,
+                            ikMaxStepDeg, rotWUse, ikLambda
+                        );
 
-                // stop at end
-                if (jogIndex >= n) {
-                    jogIndex = 0;
-                    jogging = false;
+                        jogIndex += std::max(1, jogStride);
+                        if (jogIndex >= n) {
+                            jogIndex = 0;
+                            jogging = false;
+                        }
+                    }
+                } else {
+                    const int n = traj.getNumPoints();
+                    if (n < 2) {
+                        jogging = false;
+                        jogIndex = 0;
+                    } else {
+                        jogIndex = std::clamp(jogIndex, 0, n - 1);
+
+                        glm::vec3 jogPos = traj.getPoint(jogIndex);
+
+                        // keep orientation fixed to the frozen endpoint, or ignore if orientation disabled
+                        float rotTolUse = ikUseOrientation ? ikRotTol : 999.0f;
+                        float rotWUse   = ikUseOrientation ? ikRotWeight : 0.0f;
+
+                        (void)URDFIK::SolvePoseHierDLS(
+                            robotB.Robot(), chainB,
+                            jogPos, jogEndRot,
+                            ikMaxIter, ikPosTol, rotTolUse,
+                            ikMaxStepDeg, rotWUse, ikLambda
+                        );
+
+                        jogIndex += std::max(1, jogStride);
+                        if (jogIndex >= n) {
+                            jogIndex = 0;
+                            jogging = false;
+                        }
+                    }
                 }
             }
         }
