@@ -29,6 +29,7 @@ add_executable(ArmViz
   src/Robot/URDFRobot.cpp
   src/Renderer/STLLoader.cpp
   src/Renderer/FeatureEdges.cpp
+  src/Trajectory/Trajectory.cpp
 )
 
 

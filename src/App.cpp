@@ -2,6 +2,7 @@
 #include "App.h"
 #define GLM_ENABLE_EXPERIMENTAL
 
+#include <iostream>
 #include <stdexcept>
 #include <glad/glad.h>
 #include <algorithm>
@@ -30,7 +31,7 @@
 #include "Robot/URDFRobot.h"
 #include "ImGuizmo/ImGuizmo.h"
 #include "InverseKinematics/IK.h"
-
+#include "Trajectory/Trajectory.h"
 
 static void glfw_error_callback(int error, const char* description) {
     (void)error; (void)description;
@@ -166,41 +167,74 @@ void App::run() {
     OrbitCamera camera;
     camera.attachToWindow(window_);
 
-    RobotScene robot;
-    bool robotLoaded = false;
-    std::string robotErr;
+    // ===========================
+    // TWO ROBOTS (same URDF)
+    //  - robotA: controlled by gizmo/IK
+    //  - robotB: jogged along trajectory using its OWN chain
+    // ===========================
+    RobotScene robotA;
+    RobotScene robotB;
+
+    bool robotLoadedA = false;
+    bool robotLoadedB = false;
+    std::string robotErrA;
+    std::string robotErrB;
 
     std::string urdfPath   = pickExistingPath("robot/your_robot.urdf", "build/robot/your_robot.urdf");
     std::string meshesRoot = pickExistingPath("robot/meshes",         "build/robot/meshes");
 
-    URDFIK::ChainInfo chain;
-    bool chainBuilt = false;
+    // IMPORTANT: chain must be built PER-robot instance
+    URDFIK::ChainInfo chainA;
+    URDFIK::ChainInfo chainB;
+    bool chainBuiltA = false;
+    bool chainBuiltB = false;
 
-    auto loadRobot = [&]() {
+    auto loadRobots = [&]() {
+        // reset
+        robotLoadedA = robotLoadedB = false;
+        robotErrA.clear(); robotErrB.clear();
+        chainBuiltA = chainBuiltB = false;
+        chainA = URDFIK::ChainInfo{};
+        chainB = URDFIK::ChainInfo{};
+
+        // robotA
         try {
-            robotLoaded = robot.LoadURDF(urdfPath, meshesRoot);
-            robotErr.clear();
-            if (!robotLoaded) {
-                robotErr = "RobotScene::LoadURDF returned false (paths or parse failed).";
-                chainBuilt = false;
-                return;
+            robotLoadedA = robotA.LoadURDF(urdfPath, meshesRoot);
+            if (!robotLoadedA) {
+                robotErrA = "RobotScene::LoadURDF returned false (paths or parse failed).";
+            } else {
+                chainA = URDFIK::BuildSerialChain(robotA.Robot());
+                chainBuiltA = !chainA.jointIdx.empty();
+                if (!chainBuiltA) robotErrA = "Loaded robotA, but failed to build a serial joint chain.";
             }
-            chain = URDFIK::BuildSerialChain(robot.Robot());
-            chainBuilt = !chain.jointIdx.empty();
-            if (!chainBuilt) robotErr = "Loaded robot, but failed to build a serial joint chain.";
         } catch (const std::exception& e) {
-            robotLoaded = false;
-            robotErr = e.what();
-            chainBuilt = false;
+            robotLoadedA = false;
+            robotErrA = e.what();
+            chainBuiltA = false;
+        }
+
+        // robotB
+        try {
+            robotLoadedB = robotB.LoadURDF(urdfPath, meshesRoot);
+            if (!robotLoadedB) {
+                robotErrB = "RobotScene::LoadURDF returned false (paths or parse failed).";
+            } else {
+                chainB = URDFIK::BuildSerialChain(robotB.Robot());
+                chainBuiltB = !chainB.jointIdx.empty();
+                if (!chainBuiltB) robotErrB = "Loaded robotB, but failed to build a serial joint chain.";
+            }
+        } catch (const std::exception& e) {
+            robotLoadedB = false;
+            robotErrB = e.what();
+            chainBuiltB = false;
         }
     };
 
-    loadRobot();
+    loadRobots();
 
     // Gizmo
     static ImGuizmoLite::Gizmo gizmo;
     static bool gizmoInit = false;
-
 
     struct GizmoCyl { glm::vec3 a,b; float r; glm::vec3 c; };
     std::vector<GizmoCyl> gizmoCyls;
@@ -245,6 +279,15 @@ void App::run() {
     static float ikRotWeight = 1.0f;
     static float ikLambda = 0.20f;
 
+    // Jog controls
+    static int density = 1000;
+    static int jogIndex = 0;
+    static bool jogging = false;
+    static Trajectory traj;
+
+    // Optional: how many trajectory points to advance per frame (speed)
+    static int jogStride = 1;
+
     while (!glfwWindowShouldClose(window_)) {
         beginFrame();
         ImGuiIO& io = ImGui::GetIO();
@@ -275,10 +318,10 @@ void App::run() {
         bool lmbReleased = (!lmbDown && prevMouseDown);
         prevMouseDown = lmbDown;
 
-        // init gizmo once (snap to EE)
-        if (!gizmoInit && robotLoaded && chainBuilt) {
+        // init gizmo once (snap to robotA EE)
+        if (!gizmoInit && robotLoadedA && chainBuiltA) {
             std::vector<glm::mat4> jf;
-            URDFIK::FKResult fk = URDFIK::ComputeFK(robot.Robot(), chain, jf);
+            URDFIK::FKResult fk = URDFIK::ComputeFK(robotA.Robot(), chainA, jf);
             gizmo.target.pos = fk.pos;
             gizmo.target.rot = fk.rot;
             gizmoInit = true;
@@ -298,7 +341,7 @@ void App::run() {
 
         // --- Update gizmo using the SAME matrices you'll render with ---
         gizmo.update(
-            gizmo.target,   // ee == target because gizmo is anchored on target
+            gizmo.target,   // gizmo is anchored on target
             view,
             proj,
             camPos,
@@ -314,7 +357,6 @@ void App::run() {
         shader.setMat4("uView", view);
         shader.setMat4("uProj", proj);
 
-
         shader.setBool("uUseUniformColor", false);
         shader.setFloat("uAlpha", 1.0f);
 
@@ -324,16 +366,25 @@ void App::run() {
         ImGui::Text("URDF: %s", urdfPath.c_str());
         ImGui::Text("Meshes: %s", meshesRoot.c_str());
 
-        if (!robotLoaded) {
+        if (!robotLoadedA || !robotLoadedB) {
             ImGui::Separator();
-            ImGui::TextColored(ImVec4(1,0.35f,0.35f,1), "Robot NOT loaded");
-            ImGui::TextWrapped("%s", robotErr.c_str());
-            if (ImGui::Button("Retry Load")) loadRobot();
+            if (!robotLoadedA) {
+                ImGui::TextColored(ImVec4(1,0.35f,0.35f,1), "robotA NOT loaded");
+                ImGui::TextWrapped("%s", robotErrA.c_str());
+            }
+            if (!robotLoadedB) {
+                ImGui::TextColored(ImVec4(1,0.35f,0.35f,1), "robotB NOT loaded");
+                ImGui::TextWrapped("%s", robotErrB.c_str());
+            }
+            if (ImGui::Button("Retry Load")) loadRobots();
         } else {
-            if (ImGui::Button("Reload URDF")) loadRobot();
+            if (ImGui::Button("Reload URDF (both)")) {
+                gizmoInit = false; // re-snap after reload
+                loadRobots();
+            }
 
             ImGui::Separator();
-            ImGui::Text("IK (Hierarchical DLS Pose)");
+            ImGui::Text("IK (Hierarchical DLS Pose) -> robotA only");
             ImGui::Checkbox("Enable IK", &ikEnabled);
             ImGui::SameLine();
             ImGui::Checkbox("Solve every frame", &ikSolveEveryFrame);
@@ -346,30 +397,55 @@ void App::run() {
             ImGui::SliderFloat("Rot weight", &ikRotWeight, 0.0f, 3.0f, "%.2f");
             ImGui::SliderFloat("Damping (lambda)", &ikLambda, 0.001f, 2.0f, "%.3f");
 
-            if (chainBuilt) {
-                if (ImGui::Button("Snap gizmo to EE (pos+rot)")) {
+            ImGui::Separator();
+            ImGui::Text("Jog:");
+            ImGui::SliderInt("Jog Density", &density, 100, 5000);
+            ImGui::SliderInt("Jog Stride (pts/frame)", &jogStride, 1, 50);
+
+            if (chainBuiltA) {
+                if (ImGui::Button("Snap gizmo to robotA EE (pos+rot)")) {
                     std::vector<glm::mat4> jf;
-                    URDFIK::FKResult fk = URDFIK::ComputeFK(robot.Robot(), chain, jf);
+                    URDFIK::FKResult fk = URDFIK::ComputeFK(robotA.Robot(), chainA, jf);
                     gizmo.target.pos = fk.pos;
                     gizmo.target.rot = fk.rot;
                 }
             } else {
-                ImGui::TextColored(ImVec4(1,0.6f,0.2f,1), "Chain not built: %s", robotErr.c_str());
+                ImGui::TextColored(ImVec4(1,0.6f,0.2f,1), "Chain not built (robotA): %s", robotErrA.c_str());
+            }
+
+            if (!chainBuiltB) {
+                ImGui::TextColored(ImVec4(1,0.6f,0.2f,1), "Chain not built (robotB): %s", robotErrB.c_str());
             }
 
             ImGui::Separator();
-            ImGui::Text("Joints (radians):");
+            ImGui::Text("Joints (radians) [editing robotA]:");
 
-            auto& urdf = robot.Robot();
-            for (const auto& j : urdf.Joints()) {
+            // Start jog: generate trajectory from robotB EE -> gizmo target
+            if (ImGui::Button("JOG ROBOT") && !jogging) {
+                if (robotLoadedB && chainBuiltB) {
+                    jogging = true;
+                    jogIndex = 0;
+
+                    std::vector<glm::mat4> jfB;
+                    URDFIK::FKResult fkB = URDFIK::ComputeFK(robotB.Robot(), chainB, jfB);
+
+                    traj.GeneratePoints(fkB.pos, gizmo.target.pos, density);
+
+                    std::cout << "Jog Started\n";
+                    std::cout << traj.getNumPoints() << " Points Generated\n";
+                }
+            }
+
+            auto& urdfA = robotA.Robot();
+            for (const auto& j : urdfA.Joints()) {
                 if (j.type == JointType::Fixed) continue;
 
-                float q = urdf.GetJointAngle(j.name);
+                float q = urdfA.GetJointAngle(j.name);
                 float lo = j.hasLimits ? j.lower : -3.14159f;
                 float hi = j.hasLimits ? j.upper :  3.14159f;
 
                 if (ImGui::SliderFloat(j.name.c_str(), &q, lo, hi)) {
-                    urdf.SetJointAngle(j.name, q);
+                    urdfA.SetJointAngle(j.name, q);
                 }
             }
         }
@@ -379,14 +455,14 @@ void App::run() {
         ImGui::Text("pos: %.3f %.3f %.3f", gizmo.target.pos.x, gizmo.target.pos.y, gizmo.target.pos.z);
         ImGui::End();
 
-        // ---- IK solve ----
-        if (robotLoaded && chainBuilt && ikEnabled) {
+        // ---- IK solve (robotA only) ----
+        if (robotLoadedA && chainBuiltA && ikEnabled) {
             bool shouldSolve = ikSolveEveryFrame || gizmo.capturingMouse;
             if (shouldSolve) {
                 if (ikUseOrientation) {
                     (void)URDFIK::SolvePoseHierDLS(
-                        robot.Robot(),
-                        chain,
+                        robotA.Robot(),
+                        chainA,
                         gizmo.target.pos,
                         gizmo.target.rot,
                         ikMaxIter,
@@ -398,8 +474,8 @@ void App::run() {
                     );
                 } else {
                     (void)URDFIK::SolvePoseHierDLS(
-                        robot.Robot(),
-                        chain,
+                        robotA.Robot(),
+                        chainA,
                         gizmo.target.pos,
                         gizmo.target.rot,
                         ikMaxIter,
@@ -413,12 +489,45 @@ void App::run() {
             }
         }
 
+        // ---- Jog solve (robotB only, using chainB) ----
+        if (jogging) {
+            const int n = traj.getNumPoints();
+            if (!robotLoadedB || !chainBuiltB || !ikEnabled || n < 2) {
+                jogging = false;
+                jogIndex = 0;
+            } else {
+                // clamp index
+                jogIndex = std::clamp(jogIndex, 0, n - 1);
+
+                // target point
+                glm::vec3 jogPos = traj.getPoint(jogIndex);
+
+                // Solve robotB to this point (keep orientation as gizmo target)
+                (void)URDFIK::SolvePoseHierDLS(
+                    robotB.Robot(), chainB,
+                    jogPos, gizmo.target.rot,
+                    ikMaxIter, ikPosTol, ikRotTol,
+                    ikMaxStepDeg, ikRotWeight, ikLambda
+                );
+
+                // advance (speed control)
+                jogIndex += std::max(1, jogStride);
+
+                // stop at end
+                if (jogIndex >= n) {
+                    jogIndex = 0;
+                    jogging = false;
+                }
+            }
+        }
+
         // ---- Draw grid ----
         shader.setMat4("uModel", glm::mat4(1.0f));
         grid.drawLines();
 
-        // ---- Draw robot ----
-        if (robotLoaded) robot.Draw(shader);
+        // ---- Draw BOTH robots ----
+        if (robotLoadedA) robotA.Draw(shader);
+        if (robotLoadedB) robotB.Draw(shader);
 
         // ---- Draw gizmo at target ----
         gizmoCyls.clear();

@@ -1,21 +1,16 @@
 #include "Trajectory.h"
 #include <glm/glm.hpp>
 #include <glad/glad.h>
+#include <iostream>
 
-std::vector<glm::vec3> Trajectory::GeneratePoints(glm::vec3 currentPos, glm::vec3 newPos, int density){
+void Trajectory::GeneratePoints(const glm::vec3& currentPos, const glm::vec3& newPos, int density){
+    points.clear();
 
-    std::vector<glm::vec3> points;
+    density = std::max(2, density); // at least start+end
 
-    // density in units points per unit
-    glm::vec3 path = newPos - currentPos;
-    glm::vec3 dir = glm::normalize(path);
-
-    float dist = glm::length(path);
-    float step = dist/density;
-
-    for(float i = 0.0f; i <= dist; i += step){
-        glm::vec3 p = currentPos + dir * i;
+    for (int k = 0; k < density; ++k) {
+        float t = static_cast<float>(k) / static_cast<float>(density - 1); // [0..1]
+        glm::vec3 p = glm::mix(currentPos, newPos, t);
         points.push_back(p);
     }
-
 }
