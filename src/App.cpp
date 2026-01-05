@@ -1,4 +1,3 @@
-// App.cpp
 #include "App.h"
 #define GLM_ENABLE_EXPERIMENTAL
 
@@ -180,8 +179,9 @@ void App::run() {
     std::string robotErrA;
     std::string robotErrB;
 
-    std::string urdfPath   = pickExistingPath("robot/your_robot.urdf", "build/robot/your_robot.urdf");
-    std::string meshesRoot = pickExistingPath("robot/meshes",         "build/robot/meshes");
+    std::string urdfPath   = "../IKViz/robotModel/your_robot.urdf";
+    std::string meshesRoot = "../IKViz/robotModel/meshes";
+
 
     // IMPORTANT: chain must be built PER-robot instance
     URDFIK::ChainInfo chainA;
@@ -425,10 +425,6 @@ void App::run() {
                 ImGui::TextColored(ImVec4(1,0.6f,0.2f,1), "Chain not built (robotB): %s", robotErrB.c_str());
             }
 
-            ImGui::Separator();
-            ImGui::Text("Joints (radians) [editing robotA]:");
-
-            // Start jog: generate trajectory from robotB EE -> gizmo target (pos + rot)
             if (ImGui::Button("JOG ROBOT") && !jogging) {
                 if (robotLoadedB && chainBuiltB) {
                     jogging = true;
@@ -456,6 +452,10 @@ void App::run() {
                     }
                 }
             }
+            ImGui::Separator();
+            ImGui::Text("Joints (radians) [editing robotA]:");
+
+            
 
             auto& urdfA = robotA.Robot();
             for (const auto& j : urdfA.Joints()) {

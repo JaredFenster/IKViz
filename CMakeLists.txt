@@ -73,3 +73,9 @@ FetchContent_MakeAvailable(tinyxml2)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE tinyxml2)
 target_include_directories(${PROJECT_NAME} PRIVATE ${tinyxml2_SOURCE_DIR})
+
+target_include_directories(ArmViz PRIVATE
+    "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include"
+    "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include/imgui"
+    "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include/imgui/backends"
+)
