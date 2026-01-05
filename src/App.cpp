@@ -79,6 +79,7 @@ void App::initGLAD() {
 
 void App::initOpenGLState() {
     glEnable(GL_DEPTH_TEST);
+
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
@@ -152,8 +153,18 @@ void App::run() {
         uniform bool uUseUniformColor;
         uniform vec3 uUniformColor;
 
+        // NEW: tint mode (preserves existing "important edges" in vColor)
+        uniform bool  uTintEnabled;
+        uniform vec3  uTintColor;
+        uniform float uTintStrength; // 0 = no tint, 1 = full tint
+
         void main() {
             vec3 col = uUseUniformColor ? uUniformColor : vColor;
+
+            if (uTintEnabled) {
+                col = mix(col, uTintColor, clamp(uTintStrength, 0.0, 1.0));
+            }
+
             FragColor = vec4(col, uAlpha);
         }
     )GLSL";
@@ -168,8 +179,8 @@ void App::run() {
 
     // ===========================
     // TWO ROBOTS (same URDF)
-    //  - robotA: controlled by gizmo/IK
-    //  - robotB: jogged along trajectory using its OWN chain
+    //  - robotA: controlled by gizmo/IK (preview/jog visualizer visually)
+    //  - robotB: "real" robot, normal render
     // ===========================
     RobotScene robotA;
     RobotScene robotB;
@@ -182,7 +193,6 @@ void App::run() {
     std::string urdfPath   = "../IKViz/robotModel/your_robot.urdf";
     std::string meshesRoot = "../IKViz/robotModel/meshes";
 
-
     // IMPORTANT: chain must be built PER-robot instance
     URDFIK::ChainInfo chainA;
     URDFIK::ChainInfo chainB;
@@ -190,7 +200,6 @@ void App::run() {
     bool chainBuiltB = false;
 
     auto loadRobots = [&]() {
-        // reset
         robotLoadedA = robotLoadedB = false;
         robotErrA.clear(); robotErrB.clear();
         chainBuiltA = chainBuiltB = false;
@@ -285,15 +294,19 @@ void App::run() {
     static bool jogging = false;
     static Trajectory traj;
 
-    // Optional: how many trajectory points to advance per frame (speed)
     static int jogStride = 1;
-
-    // Jog settings
     static bool jogInterpRotation = true;
 
-    // Frozen jog endpoints (so moving the gizmo mid-jog doesn't change the goal)
     static glm::vec3 jogEndPos(0.0f);
     static glm::quat jogEndRot(1,0,0,0);
+
+    // ---------------------------
+    // Preview (robotA) appearance
+    // ---------------------------
+    static bool  previewTint   = true;                 // keep vColor edges, tint orange
+    static float previewAlpha  = 0.35f;                // opacity for robotA
+    static float previewColor[3] = {1.0f, 0.55f, 0.15f}; // orange
+    static float previewTintStrength = 1.0f;           // 0..1, usually 1 for "fully orange"
 
     while (!glfwWindowShouldClose(window_)) {
         beginFrame();
@@ -316,7 +329,6 @@ void App::run() {
         float sx = (winW > 0) ? (float)fbW / (float)winW : 1.0f;
         float sy = (winH > 0) ? (float)fbH / (float)winH : 1.0f;
 
-        // IMPORTANT: keep top-left origin (NO Y FLIP) because Gizmo.h does the flip internally
         float mx = (float)mxWin * sx;
         float my = (float)myWin * sy;
 
@@ -338,17 +350,13 @@ void App::run() {
             camera.updateFromInput(io.WantCaptureMouse);
         }
 
-        // Build view/proj AFTER camera update so gizmo math == render math
         glm::mat4 view = camera.view();
         glm::mat4 proj = camera.orthoProjFromRadius(window_);
         glm::vec3 camPos = camera.getCamPos();
-
-        // Use actual camera forward from the view matrix (stable for ortho/persp)
         glm::vec3 camForward = glm::normalize(-glm::vec3(view[2]));
 
-        // --- Update gizmo using the SAME matrices you'll render with ---
         gizmo.update(
-            gizmo.target,   // gizmo is anchored on target
+            gizmo.target,
             view,
             proj,
             camPos,
@@ -359,13 +367,16 @@ void App::run() {
         );
         gizmo.target.rot = glm::normalize(gizmo.target.rot);
 
-        // Then render using *these same* view/proj (DO NOT recompute later)
         shader.use();
         shader.setMat4("uView", view);
         shader.setMat4("uProj", proj);
 
+        // defaults
         shader.setBool("uUseUniformColor", false);
         shader.setFloat("uAlpha", 1.0f);
+        shader.setBool("uTintEnabled", false);
+        shader.setVec3("uTintColor", glm::vec3(1.0f, 1.0f, 1.0f));
+        shader.setFloat("uTintStrength", 0.0f);
 
         // ---- UI ----
         ImGui::Begin("ArmViz");
@@ -386,7 +397,7 @@ void App::run() {
             if (ImGui::Button("Retry Load")) loadRobots();
         } else {
             if (ImGui::Button("Reload URDF (both)")) {
-                gizmoInit = false; // re-snap after reload
+                gizmoInit = false;
                 loadRobots();
             }
 
@@ -409,6 +420,30 @@ void App::run() {
             ImGui::SliderInt("Jog Density", &density, 100, 5000);
             ImGui::SliderInt("Jog Stride (pts/frame)", &jogStride, 1, 50);
             ImGui::Checkbox("Interpolate Rotation (slerp)", &jogInterpRotation);
+            if (ImGui::Button("JOG ROBOT") && !jogging) {
+                if (robotLoadedB && chainBuiltB) {
+                    jogging = true;
+                    jogIndex = 0;
+
+                    jogEndPos = gizmo.target.pos;
+                    jogEndRot = gizmo.target.rot;
+
+                    std::vector<glm::mat4> jfB;
+                    URDFIK::FKResult fkB = URDFIK::ComputeFK(robotB.Robot(), chainB, jfB);
+
+                    if (jogInterpRotation) {
+                        traj.GeneratePoses(fkB.pos, fkB.rot, jogEndPos, jogEndRot, density);
+                    } else {
+                        traj.GeneratePoints(fkB.pos, jogEndPos, density);
+                    }
+                }
+            }
+            ImGui::Separator();
+            ImGui::Text("Preview robot (robotA look):");
+            ImGui::Checkbox("Tint mode (preserves edges)", &previewTint);
+            ImGui::ColorEdit3("robotA tint color", previewColor);
+            ImGui::SliderFloat("robotA tint strength", &previewTintStrength, 0.0f, 1.0f, "%.2f");
+            ImGui::SliderFloat("robotA opacity", &previewAlpha, 0.0f, 1.0f, "%.2f");
 
             if (chainBuiltA) {
                 if (ImGui::Button("Snap gizmo to robotA EE (pos+rot)")) {
@@ -417,45 +452,11 @@ void App::run() {
                     gizmo.target.pos = fk.pos;
                     gizmo.target.rot = fk.rot;
                 }
-            } else {
-                ImGui::TextColored(ImVec4(1,0.6f,0.2f,1), "Chain not built (robotA): %s", robotErrA.c_str());
             }
 
-            if (!chainBuiltB) {
-                ImGui::TextColored(ImVec4(1,0.6f,0.2f,1), "Chain not built (robotB): %s", robotErrB.c_str());
-            }
 
-            if (ImGui::Button("JOG ROBOT") && !jogging) {
-                if (robotLoadedB && chainBuiltB) {
-                    jogging = true;
-                    jogIndex = 0;
-
-                    // freeze endpoint at the moment jog begins
-                    jogEndPos = gizmo.target.pos;
-                    jogEndRot = gizmo.target.rot;
-
-                    std::vector<glm::mat4> jfB;
-                    URDFIK::FKResult fkB = URDFIK::ComputeFK(robotB.Robot(), chainB, jfB);
-
-                    if (jogInterpRotation) {
-                        traj.GeneratePoses(
-                            fkB.pos, fkB.rot,
-                            jogEndPos, jogEndRot,
-                            density
-                        );
-                        std::cout << "Jog Started (pos+rot)\n";
-                        std::cout << traj.getNumPoses() << " Poses Generated\n";
-                    } else {
-                        traj.GeneratePoints(fkB.pos, jogEndPos, density);
-                        std::cout << "Jog Started (pos only)\n";
-                        std::cout << traj.getNumPoints() << " Points Generated\n";
-                    }
-                }
-            }
             ImGui::Separator();
             ImGui::Text("Joints (radians) [editing robotA]:");
-
-            
 
             auto& urdfA = robotA.Robot();
             for (const auto& j : urdfA.Joints()) {
@@ -480,37 +481,25 @@ void App::run() {
         if (robotLoadedA && chainBuiltA && ikEnabled) {
             bool shouldSolve = ikSolveEveryFrame || gizmo.capturingMouse;
             if (shouldSolve) {
-                if (ikUseOrientation) {
-                    (void)URDFIK::SolvePoseHierDLS(
-                        robotA.Robot(),
-                        chainA,
-                        gizmo.target.pos,
-                        gizmo.target.rot,
-                        ikMaxIter,
-                        ikPosTol,
-                        ikRotTol,
-                        ikMaxStepDeg,
-                        ikRotWeight,
-                        ikLambda
-                    );
-                } else {
-                    (void)URDFIK::SolvePoseHierDLS(
-                        robotA.Robot(),
-                        chainA,
-                        gizmo.target.pos,
-                        gizmo.target.rot,
-                        ikMaxIter,
-                        ikPosTol,
-                        999.0f,
-                        ikMaxStepDeg,
-                        0.0f,
-                        ikLambda
-                    );
-                }
+                float rotTolUse = ikUseOrientation ? ikRotTol : 999.0f;
+                float rotWUse   = ikUseOrientation ? ikRotWeight : 0.0f;
+
+                (void)URDFIK::SolvePoseHierDLS(
+                    robotA.Robot(),
+                    chainA,
+                    gizmo.target.pos,
+                    gizmo.target.rot,
+                    ikMaxIter,
+                    ikPosTol,
+                    rotTolUse,
+                    ikMaxStepDeg,
+                    rotWUse,
+                    ikLambda
+                );
             }
         }
 
-        // ---- Jog solve (robotB only, using chainB) ----
+        // ---- Jog solve (robotB only) ----
         if (jogging) {
             if (!robotLoadedB || !chainBuiltB || !ikEnabled) {
                 jogging = false;
@@ -527,7 +516,6 @@ void App::run() {
                         glm::vec3 jogPos = traj.getPos(jogIndex);
                         glm::quat jogRot = traj.getRot(jogIndex);
 
-                        // If user disabled orientation globally, still jog position only.
                         float rotTolUse = ikUseOrientation ? ikRotTol : 999.0f;
                         float rotWUse   = ikUseOrientation ? ikRotWeight : 0.0f;
 
@@ -551,10 +539,8 @@ void App::run() {
                         jogIndex = 0;
                     } else {
                         jogIndex = std::clamp(jogIndex, 0, n - 1);
-
                         glm::vec3 jogPos = traj.getPoint(jogIndex);
 
-                        // keep orientation fixed to the frozen endpoint, or ignore if orientation disabled
                         float rotTolUse = ikUseOrientation ? ikRotTol : 999.0f;
                         float rotWUse   = ikUseOrientation ? ikRotWeight : 0.0f;
 
@@ -576,17 +562,42 @@ void App::run() {
         }
 
         // ---- Draw grid ----
+        shader.setBool("uUseUniformColor", false);
+        shader.setBool("uTintEnabled", false);
+        shader.setFloat("uAlpha", 1.0f);
         shader.setMat4("uModel", glm::mat4(1.0f));
         grid.drawLines();
 
-        // ---- Draw BOTH robots ----
-        if (robotLoadedA) robotA.Draw(shader);
+        // ---- Draw robotB normally (real robot) ----
+        shader.setBool("uUseUniformColor", false);
+        shader.setBool("uTintEnabled", false);
+        shader.setFloat("uAlpha", 1.0f);
         if (robotLoadedB) robotB.Draw(shader);
+
+        // ---- Draw robotA tinted (preview robot) preserving edges ----
+        if (robotLoadedA) {
+            // Transparency: depth test ON, depth write OFF
+            glDepthMask(GL_FALSE);
+
+            shader.setBool("uUseUniformColor", false); // IMPORTANT: keep vColor so edges match
+            shader.setBool("uTintEnabled", previewTint);
+            shader.setVec3("uTintColor", glm::vec3(previewColor[0], previewColor[1], previewColor[2]));
+            shader.setFloat("uTintStrength", std::clamp(previewTintStrength, 0.0f, 1.0f));
+            shader.setFloat("uAlpha", std::clamp(previewAlpha, 0.0f, 1.0f));
+
+            robotA.Draw(shader);
+
+            // restore
+            shader.setBool("uTintEnabled", false);
+            shader.setFloat("uAlpha", 1.0f);
+            glDepthMask(GL_TRUE);
+        }
 
         // ---- Draw gizmo at target ----
         gizmoCyls.clear();
         gizmo.draw(gizmo.target, proj, drawCylinder);
 
+        shader.setBool("uTintEnabled", false);
         shader.setBool("uUseUniformColor", true);
         shader.setFloat("uAlpha", 1.0f);
 
@@ -597,6 +608,7 @@ void App::run() {
         }
 
         shader.setBool("uUseUniformColor", false);
+        shader.setFloat("uAlpha", 1.0f);
 
         endFrame();
     }
