@@ -32,6 +32,13 @@
 #include "InverseKinematics/IK.h"
 #include "Trajectory/Trajectory.h"
 
+#ifndef PROJECT_ROOT_DIR
+#define PROJECT_ROOT_DIR "."
+#endif
+
+
+
+
 static void glfw_error_callback(int error, const char* description) {
     (void)error; (void)description;
 }
@@ -190,8 +197,8 @@ void App::run() {
     std::string robotErrA;
     std::string robotErrB;
 
-    std::string urdfPath   = "../IKViz/robotModel/your_robot.urdf";
-    std::string meshesRoot = "../IKViz/robotModel/meshes";
+    std::string urdfPath   = std::string(PROJECT_ROOT_DIR) + "/robotModel/your_robot.urdf";
+    std::string meshesRoot = std::string(PROJECT_ROOT_DIR) + "/robotModel/meshes";
 
     // IMPORTANT: chain must be built PER-robot instance
     URDFIK::ChainInfo chainA;

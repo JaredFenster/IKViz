@@ -79,3 +79,7 @@ target_include_directories(ArmViz PRIVATE
     "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include/imgui"
     "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/include/imgui/backends"
 )
+
+target_compile_definitions(ArmViz PRIVATE
+        PROJECT_ROOT_DIR="${CMAKE_SOURCE_DIR}"
+)
