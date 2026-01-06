@@ -639,64 +639,11 @@ void App::run()
         shader.setFloat("uAlpha", 1.0f);
         if (robotLoadedB) robotB.Draw(shader);
 
-        // ---- Draw robotA exactly like robotB (opaque), but tinted orange (including edges) ----
-        if (robotLoadedA)
-        {
-            shader.setBool("uUseUniformColor", false);
-            shader.setFloat("uAlpha", 1.0f);
-
-            shader.setBool("uTintEnabled", true);
-            shader.setVec3("uTintColor", robotATintColor);
-            shader.setFloat("uTintStrength", robotATintStrength);
-
-            // robotB
-            shader.setBool("uTintEnabled", false);
-            shader.setFloat("uAlpha", 1.0f);
-            if (robotLoadedB) robotB.Draw(shader);
-
-            // ... inside your robotA render block ...
-
-            if (robotLoadedA) {
-                // ------------------------------------------------
-                // Pass 1: Faces (Tinted Orange) -> PUSHED BACK
-                // ------------------------------------------------
-                // Enable Polygon Offset for "FILL" mode (the triangles)
-                glEnable(GL_POLYGON_OFFSET_FILL);
-
-                // Positive offset pushes geometry AWAY from the camera (deeper into Z-buffer)
-                // 1.0 factor, 1.0 units is usually sufficient
-                glPolygonOffset(1.0f, 1.0f);
-
-                shader.setBool("uUseUniformColor", false);
-                shader.setBool("uTintEnabled", true);
-                shader.setVec3("uTintColor", robotATintColor);
-                shader.setFloat("uTintStrength", robotATintStrength);
-
-                robotA.Draw(shader); // Draws GL_TRIANGLES
-
-                // Disable offset immediately so it doesn't mess up other rendering
-                glDisable(GL_POLYGON_OFFSET_FILL);
-
-
-                // ------------------------------------------------
-                // Pass 2: Edges (Solid Black) -> DRAWN NORMALLY
-                // ------------------------------------------------
-                // No offset needed here; since faces are pushed back, these lines
-                // (at normal depth) will appear "in front".
-
-                shader.setBool("uTintEnabled", false);
-
-                // Force solid black
-                shader.setBool("uUseUniformColor", true);
-                shader.setVec3("uUniformColor", glm::vec3(0.0f, 0.0f, 0.0f));
-
-                // Assuming DrawEdges renders the GL_LINES mesh created by FeatureEdges
-                robotA.DrawEdges(shader);
-
-                // Cleanup state
-                shader.setBool("uUseUniformColor", false);
-            }
-        }
+        shader.setBool("uUseUniformColor", true);
+        shader.setVec3("uUniformColor", glm::vec3(1.0f, 0.569f, 0.0f));
+        shader.setMat4("uModel", glm::mat4(1.0f));
+        shader.setFloat("uAlpha", 0.5f); // Opacity
+        if (robotLoadedA) robotA.Draw(shader);
 
         // ---- Draw gizmo at target ----
         gizmoCyls.clear();
