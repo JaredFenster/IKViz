@@ -36,14 +36,14 @@
 #define PROJECT_ROOT_DIR "."
 #endif
 
-
-
-
-static void glfw_error_callback(int error, const char* description) {
-    (void)error; (void)description;
+static void glfw_error_callback(int error, const char* description)
+{
+    (void)error;
+    (void)description;
 }
 
-App::App() {
+App::App()
+{
     glfwSetErrorCallback(glfw_error_callback);
     initGLFW();
     createWindow();
@@ -52,16 +52,19 @@ App::App() {
     initImGui();
 }
 
-App::~App() {
+App::~App()
+{
     shutdownImGui();
-    if (window_) {
+    if (window_)
+    {
         glfwDestroyWindow(window_);
         window_ = nullptr;
     }
     glfwTerminate();
 }
 
-void App::initGLFW() {
+void App::initGLFW()
+{
     if (!glfwInit()) throw std::runtime_error("GLFW init failed");
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -70,7 +73,8 @@ void App::initGLFW() {
     glfwWindowHint(GLFW_DEPTH_BITS, 24);
 }
 
-void App::createWindow() {
+void App::createWindow()
+{
     window_ = glfwCreateWindow(1280, 720, "ArmViz", nullptr, nullptr);
     if (!window_) throw std::runtime_error("Window creation failed");
 
@@ -78,20 +82,24 @@ void App::createWindow() {
     glfwSwapInterval(1);
 }
 
-void App::initGLAD() {
-    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+void App::initGLAD()
+{
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
+    {
         throw std::runtime_error("GLAD init failed");
     }
 }
 
-void App::initOpenGLState() {
+void App::initOpenGLState()
+{
     glEnable(GL_DEPTH_TEST);
 
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 }
 
-void App::initImGui() {
+void App::initImGui()
+{
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::StyleColorsDark();
@@ -100,13 +108,15 @@ void App::initImGui() {
     ImGui_ImplOpenGL3_Init("#version 330");
 }
 
-void App::shutdownImGui() {
+void App::shutdownImGui()
+{
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 }
 
-void App::beginFrame() {
+void App::beginFrame()
+{
     glfwPollEvents();
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplGlfw_NewFrame();
@@ -120,19 +130,22 @@ void App::beginFrame() {
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 }
 
-void App::endFrame() {
+void App::endFrame()
+{
     ImGui::Render();
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     glfwSwapBuffers(window_);
 }
 
-static std::string pickExistingPath(const std::string& a, const std::string& b) {
+static std::string pickExistingPath(const std::string& a, const std::string& b)
+{
     if (std::filesystem::exists(a)) return a;
     if (std::filesystem::exists(b)) return b;
     return a;
 }
 
-void App::run() {
+void App::run()
+{
     const char* vsSrc = R"GLSL(
         #version 330 core
         layout (location = 0) in vec3 aPos;
@@ -160,7 +173,7 @@ void App::run() {
         uniform bool uUseUniformColor;
         uniform vec3 uUniformColor;
 
-        // NEW: tint mode (preserves existing "important edges" in vColor)
+        // tint mode (mixes tint with existing vColor/uniform)
         uniform bool  uTintEnabled;
         uniform vec3  uTintColor;
         uniform float uTintStrength; // 0 = no tint, 1 = full tint
@@ -178,7 +191,7 @@ void App::run() {
 
     Shader shader(vsSrc, fsSrc);
 
-    Mesh grid    = Mesh::fromVertexColorLines(makeGridVerts(10));
+    Mesh grid = Mesh::fromVertexColorLines(makeGridVerts(10));
     Mesh unitCyl = Mesh::fromVertexColorTriangles(makeCylinderVerts(1.0f, 1.0f, 24));
 
     OrbitCamera camera;
@@ -186,7 +199,7 @@ void App::run() {
 
     // ===========================
     // TWO ROBOTS (same URDF)
-    //  - robotA: controlled by gizmo/IK (preview/jog visualizer visually)
+    //  - robotA: controlled by gizmo/IK
     //  - robotB: "real" robot, normal render
     // ===========================
     RobotScene robotA;
@@ -197,7 +210,7 @@ void App::run() {
     std::string robotErrA;
     std::string robotErrB;
 
-    std::string urdfPath   = std::string(PROJECT_ROOT_DIR) + "/robotModel/your_robot.urdf";
+    std::string urdfPath = std::string(PROJECT_ROOT_DIR) + "/robotModel/your_robot.urdf";
     std::string meshesRoot = std::string(PROJECT_ROOT_DIR) + "/robotModel/meshes";
 
     // IMPORTANT: chain must be built PER-robot instance
@@ -206,40 +219,54 @@ void App::run() {
     bool chainBuiltA = false;
     bool chainBuiltB = false;
 
-    auto loadRobots = [&]() {
+    auto loadRobots = [&]()
+    {
         robotLoadedA = robotLoadedB = false;
-        robotErrA.clear(); robotErrB.clear();
+        robotErrA.clear();
+        robotErrB.clear();
         chainBuiltA = chainBuiltB = false;
         chainA = URDFIK::ChainInfo{};
         chainB = URDFIK::ChainInfo{};
 
         // robotA
-        try {
+        try
+        {
             robotLoadedA = robotA.LoadURDF(urdfPath, meshesRoot);
-            if (!robotLoadedA) {
+            if (!robotLoadedA)
+            {
                 robotErrA = "RobotScene::LoadURDF returned false (paths or parse failed).";
-            } else {
+            }
+            else
+            {
                 chainA = URDFIK::BuildSerialChain(robotA.Robot());
                 chainBuiltA = !chainA.jointIdx.empty();
                 if (!chainBuiltA) robotErrA = "Loaded robotA, but failed to build a serial joint chain.";
             }
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception& e)
+        {
             robotLoadedA = false;
             robotErrA = e.what();
             chainBuiltA = false;
         }
 
         // robotB
-        try {
+        try
+        {
             robotLoadedB = robotB.LoadURDF(urdfPath, meshesRoot);
-            if (!robotLoadedB) {
+            if (!robotLoadedB)
+            {
                 robotErrB = "RobotScene::LoadURDF returned false (paths or parse failed).";
-            } else {
+            }
+            else
+            {
                 chainB = URDFIK::BuildSerialChain(robotB.Robot());
                 chainBuiltB = !chainB.jointIdx.empty();
                 if (!chainBuiltB) robotErrB = "Loaded robotB, but failed to build a serial joint chain.";
             }
-        } catch (const std::exception& e) {
+        }
+        catch (const std::exception& e)
+        {
             robotLoadedB = false;
             robotErrB = e.what();
             chainBuiltB = false;
@@ -252,20 +279,27 @@ void App::run() {
     static ImGuizmoLite::Gizmo gizmo;
     static bool gizmoInit = false;
 
-    struct GizmoCyl { glm::vec3 a,b; float r; glm::vec3 c; };
+    struct GizmoCyl
+    {
+        glm::vec3 a, b;
+        float r;
+        glm::vec3 c;
+    };
     std::vector<GizmoCyl> gizmoCyls;
 
-    auto drawCylinder = [&](const glm::vec3& a, const glm::vec3& b, float radius, const glm::vec3& color) {
+    auto drawCylinder = [&](const glm::vec3& a, const glm::vec3& b, float radius, const glm::vec3& color)
+    {
         gizmoCyls.push_back({a, b, radius, color});
     };
 
-    auto cylinderModel = [&](const glm::vec3& a, const glm::vec3& b, float radius) -> glm::mat4 {
+    auto cylinderModel = [&](const glm::vec3& a, const glm::vec3& b, float radius) -> glm::mat4
+    {
         glm::vec3 d = b - a;
         float len = glm::length(d);
         if (len < 1e-6f) return glm::mat4(1.0f);
 
         glm::vec3 z = d / len;
-        glm::vec3 up = (std::fabs(z.y) < 0.99f) ? glm::vec3(0,1,0) : glm::vec3(1,0,0);
+        glm::vec3 up = (std::fabs(z.y) < 0.99f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
         glm::vec3 x = glm::normalize(glm::cross(up, z));
         glm::vec3 y = glm::cross(z, x);
 
@@ -288,7 +322,7 @@ void App::run() {
     static bool ikSolveEveryFrame = false;
     static bool ikUseOrientation = true;
 
-    static int   ikMaxIter = 60;
+    static int ikMaxIter = 60;
     static float ikPosTol = 0.002f;
     static float ikRotTol = 0.02f;
     static float ikMaxStepDeg = 6.0f;
@@ -305,16 +339,14 @@ void App::run() {
     static bool jogInterpRotation = true;
 
     static glm::vec3 jogEndPos(0.0f);
-    static glm::quat jogEndRot(1,0,0,0);
+    static glm::quat jogEndRot(1, 0, 0, 0);
 
-    // ---------------------------
-    // Preview (robotA) appearance
-    // ---------------------------
-    // robotA will render with semi-transparent faces and the same opaque
-    // feature edges as robotB (MoveIt-like preview). Hardcoded preview alpha.
-    static float previewAlpha  = 0.35f;                // opacity for robotA
+    // robotA tint (same opacity/edges as robotB, just orange)
+    const glm::vec3 robotATintColor = glm::vec3(1.0f, 0.55f, 0.10f); // orange
+    const float robotATintStrength = 1.0f; // full orange
 
-    while (!glfwWindowShouldClose(window_)) {
+    while (!glfwWindowShouldClose(window_))
+    {
         beginFrame();
         ImGuiIO& io = ImGui::GetIO();
 
@@ -339,12 +371,13 @@ void App::run() {
         float my = (float)myWin * sy;
 
         bool lmbDown = glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-        bool lmbPressed  = (lmbDown && !prevMouseDown);
+        bool lmbPressed = (lmbDown && !prevMouseDown);
         bool lmbReleased = (!lmbDown && prevMouseDown);
         prevMouseDown = lmbDown;
 
         // init gizmo once (snap to robotA EE)
-        if (!gizmoInit && robotLoadedA && chainBuiltA) {
+        if (!gizmoInit && robotLoadedA && chainBuiltA)
+        {
             std::vector<glm::mat4> jf;
             URDFIK::FKResult fk = URDFIK::ComputeFK(robotA.Robot(), chainA, jf);
             gizmo.target.pos = fk.pos;
@@ -352,7 +385,8 @@ void App::run() {
             gizmoInit = true;
         }
 
-        if (!gizmo.capturingMouse) {
+        if (!gizmo.capturingMouse)
+        {
             camera.updateFromInput(io.WantCaptureMouse);
         }
 
@@ -390,19 +424,25 @@ void App::run() {
         ImGui::Text("URDF: %s", urdfPath.c_str());
         ImGui::Text("Meshes: %s", meshesRoot.c_str());
 
-        if (!robotLoadedA || !robotLoadedB) {
+        if (!robotLoadedA || !robotLoadedB)
+        {
             ImGui::Separator();
-            if (!robotLoadedA) {
-                ImGui::TextColored(ImVec4(1,0.35f,0.35f,1), "robotA NOT loaded");
+            if (!robotLoadedA)
+            {
+                ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1), "robotA NOT loaded");
                 ImGui::TextWrapped("%s", robotErrA.c_str());
             }
-            if (!robotLoadedB) {
-                ImGui::TextColored(ImVec4(1,0.35f,0.35f,1), "robotB NOT loaded");
+            if (!robotLoadedB)
+            {
+                ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1), "robotB NOT loaded");
                 ImGui::TextWrapped("%s", robotErrB.c_str());
             }
             if (ImGui::Button("Retry Load")) loadRobots();
-        } else {
-            if (ImGui::Button("Reload URDF (both)")) {
+        }
+        else
+        {
+            if (ImGui::Button("Reload URDF (both)"))
+            {
                 gizmoInit = false;
                 loadRobots();
             }
@@ -426,8 +466,10 @@ void App::run() {
             ImGui::SliderInt("Jog Density", &density, 100, 5000);
             ImGui::SliderInt("Jog Stride (pts/frame)", &jogStride, 1, 50);
             ImGui::Checkbox("Interpolate Rotation (slerp)", &jogInterpRotation);
-            if (ImGui::Button("JOG ROBOT") && !jogging) {
-                if (robotLoadedB && chainBuiltB) {
+            if (ImGui::Button("JOG ROBOT") && !jogging)
+            {
+                if (robotLoadedB && chainBuiltB)
+                {
                     jogging = true;
                     jogIndex = 0;
 
@@ -437,17 +479,21 @@ void App::run() {
                     std::vector<glm::mat4> jfB;
                     URDFIK::FKResult fkB = URDFIK::ComputeFK(robotB.Robot(), chainB, jfB);
 
-                    if (jogInterpRotation) {
+                    if (jogInterpRotation)
+                    {
                         traj.GeneratePoses(fkB.pos, fkB.rot, jogEndPos, jogEndRot, density);
-                    } else {
+                    }
+                    else
+                    {
                         traj.GeneratePoints(fkB.pos, jogEndPos, density);
                     }
                 }
             }
-            // Preview appearance controls removed - preview is fixed
 
-            if (chainBuiltA) {
-                if (ImGui::Button("Snap gizmo to robotA EE (pos+rot)")) {
+            if (chainBuiltA)
+            {
+                if (ImGui::Button("Snap gizmo to robotA EE (pos+rot)"))
+                {
                     std::vector<glm::mat4> jf;
                     URDFIK::FKResult fk = URDFIK::ComputeFK(robotA.Robot(), chainA, jf);
                     gizmo.target.pos = fk.pos;
@@ -455,19 +501,20 @@ void App::run() {
                 }
             }
 
-
             ImGui::Separator();
             ImGui::Text("Joints (radians) [editing robotA]:");
 
             auto& urdfA = robotA.Robot();
-            for (const auto& j : urdfA.Joints()) {
+            for (const auto& j : urdfA.Joints())
+            {
                 if (j.type == JointType::Fixed) continue;
 
                 float q = urdfA.GetJointAngle(j.name);
                 float lo = j.hasLimits ? j.lower : -3.14159f;
-                float hi = j.hasLimits ? j.upper :  3.14159f;
+                float hi = j.hasLimits ? j.upper : 3.14159f;
 
-                if (ImGui::SliderFloat(j.name.c_str(), &q, lo, hi)) {
+                if (ImGui::SliderFloat(j.name.c_str(), &q, lo, hi))
+                {
                     urdfA.SetJointAngle(j.name, q);
                 }
             }
@@ -479,11 +526,13 @@ void App::run() {
         ImGui::End();
 
         // ---- IK solve (robotA only) ----
-        if (robotLoadedA && chainBuiltA && ikEnabled) {
+        if (robotLoadedA && chainBuiltA && ikEnabled)
+        {
             bool shouldSolve = ikSolveEveryFrame || gizmo.capturingMouse;
-            if (shouldSolve) {
+            if (shouldSolve)
+            {
                 float rotTolUse = ikUseOrientation ? ikRotTol : 999.0f;
-                float rotWUse   = ikUseOrientation ? ikRotWeight : 0.0f;
+                float rotWUse = ikUseOrientation ? ikRotWeight : 0.0f;
 
                 (void)URDFIK::SolvePoseHierDLS(
                     robotA.Robot(),
@@ -501,24 +550,32 @@ void App::run() {
         }
 
         // ---- Jog solve (robotB only) ----
-        if (jogging) {
-            if (!robotLoadedB || !chainBuiltB || !ikEnabled) {
+        if (jogging)
+        {
+            if (!robotLoadedB || !chainBuiltB || !ikEnabled)
+            {
                 jogging = false;
                 jogIndex = 0;
-            } else {
-                if (jogInterpRotation) {
+            }
+            else
+            {
+                if (jogInterpRotation)
+                {
                     const int n = traj.getNumPoses();
-                    if (n < 2) {
+                    if (n < 2)
+                    {
                         jogging = false;
                         jogIndex = 0;
-                    } else {
+                    }
+                    else
+                    {
                         jogIndex = std::clamp(jogIndex, 0, n - 1);
 
                         glm::vec3 jogPos = traj.getPos(jogIndex);
                         glm::quat jogRot = traj.getRot(jogIndex);
 
                         float rotTolUse = ikUseOrientation ? ikRotTol : 999.0f;
-                        float rotWUse   = ikUseOrientation ? ikRotWeight : 0.0f;
+                        float rotWUse = ikUseOrientation ? ikRotWeight : 0.0f;
 
                         (void)URDFIK::SolvePoseHierDLS(
                             robotB.Robot(), chainB,
@@ -528,22 +585,28 @@ void App::run() {
                         );
 
                         jogIndex += std::max(1, jogStride);
-                        if (jogIndex >= n) {
+                        if (jogIndex >= n)
+                        {
                             jogIndex = 0;
                             jogging = false;
                         }
                     }
-                } else {
+                }
+                else
+                {
                     const int n = traj.getNumPoints();
-                    if (n < 2) {
+                    if (n < 2)
+                    {
                         jogging = false;
                         jogIndex = 0;
-                    } else {
+                    }
+                    else
+                    {
                         jogIndex = std::clamp(jogIndex, 0, n - 1);
                         glm::vec3 jogPos = traj.getPoint(jogIndex);
 
                         float rotTolUse = ikUseOrientation ? ikRotTol : 999.0f;
-                        float rotWUse   = ikUseOrientation ? ikRotWeight : 0.0f;
+                        float rotWUse = ikUseOrientation ? ikRotWeight : 0.0f;
 
                         (void)URDFIK::SolvePoseHierDLS(
                             robotB.Robot(), chainB,
@@ -553,7 +616,8 @@ void App::run() {
                         );
 
                         jogIndex += std::max(1, jogStride);
-                        if (jogIndex >= n) {
+                        if (jogIndex >= n)
+                        {
                             jogIndex = 0;
                             jogging = false;
                         }
@@ -575,26 +639,64 @@ void App::run() {
         shader.setFloat("uAlpha", 1.0f);
         if (robotLoadedB) robotB.Draw(shader);
 
-            // ---- Draw robotA preview: translucent faces, opaque feature edges ----
+        // ---- Draw robotA exactly like robotB (opaque), but tinted orange (including edges) ----
+        if (robotLoadedA)
+        {
+            shader.setBool("uUseUniformColor", false);
+            shader.setFloat("uAlpha", 1.0f);
+
+            shader.setBool("uTintEnabled", true);
+            shader.setVec3("uTintColor", robotATintColor);
+            shader.setFloat("uTintStrength", robotATintStrength);
+
+            // robotB
+            shader.setBool("uTintEnabled", false);
+            shader.setFloat("uAlpha", 1.0f);
+            if (robotLoadedB) robotB.Draw(shader);
+
+            // ... inside your robotA render block ...
+
             if (robotLoadedA) {
-                // Draw translucent faces first (depth writes off so translucency blends)
-                glDepthMask(GL_FALSE);
+                // ------------------------------------------------
+                // Pass 1: Faces (Tinted Orange) -> PUSHED BACK
+                // ------------------------------------------------
+                // Enable Polygon Offset for "FILL" mode (the triangles)
+                glEnable(GL_POLYGON_OFFSET_FILL);
 
-                shader.setBool("uUseUniformColor", false); // keep vertex colors for faces
-                shader.setBool("uTintEnabled", false);
-                shader.setFloat("uAlpha", std::clamp(previewAlpha, 0.0f, 1.0f));
-
-                robotA.DrawPreview(shader);
-
-                // restore depth writes and draw opaque edges on top
-                shader.setFloat("uAlpha", 1.0f);
-                glDepthMask(GL_TRUE);
+                // Positive offset pushes geometry AWAY from the camera (deeper into Z-buffer)
+                // 1.0 factor, 1.0 units is usually sufficient
+                glPolygonOffset(1.0f, 1.0f);
 
                 shader.setBool("uUseUniformColor", false);
+                shader.setBool("uTintEnabled", true);
+                shader.setVec3("uTintColor", robotATintColor);
+                shader.setFloat("uTintStrength", robotATintStrength);
+
+                robotA.Draw(shader); // Draws GL_TRIANGLES
+
+                // Disable offset immediately so it doesn't mess up other rendering
+                glDisable(GL_POLYGON_OFFSET_FILL);
+
+
+                // ------------------------------------------------
+                // Pass 2: Edges (Solid Black) -> DRAWN NORMALLY
+                // ------------------------------------------------
+                // No offset needed here; since faces are pushed back, these lines
+                // (at normal depth) will appear "in front".
+
                 shader.setBool("uTintEnabled", false);
-                shader.setFloat("uAlpha", 1.0f);
+
+                // Force solid black
+                shader.setBool("uUseUniformColor", true);
+                shader.setVec3("uUniformColor", glm::vec3(0.0f, 0.0f, 0.0f));
+
+                // Assuming DrawEdges renders the GL_LINES mesh created by FeatureEdges
                 robotA.DrawEdges(shader);
-                }
+
+                // Cleanup state
+                shader.setBool("uUseUniformColor", false);
+            }
+        }
 
         // ---- Draw gizmo at target ----
         gizmoCyls.clear();
@@ -604,7 +706,8 @@ void App::run() {
         shader.setBool("uUseUniformColor", true);
         shader.setFloat("uAlpha", 1.0f);
 
-        for (const auto& seg : gizmoCyls) {
+        for (const auto& seg : gizmoCyls)
+        {
             shader.setVec3("uUniformColor", seg.c);
             shader.setMat4("uModel", cylinderModel(seg.a, seg.b, seg.r));
             unitCyl.drawTriangles();
