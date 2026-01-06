@@ -8,6 +8,10 @@ class RobotScene {
 public:
     bool LoadURDF(const std::string& urdfPath, const std::string& meshesRoot);
     void Draw(const Shader& shader);
+    // Draw only the filled triangles (no edges), used for translucent preview
+    void DrawPreview(const Shader& shader);
+    // Draw only the feature edges (lines) - drawn opaque on top of previews
+    void DrawEdges(const Shader& shader);
 
     // expose joint control (ImGui sliders)
     URDFRobot& Robot() { return robot_; }

@@ -303,10 +303,9 @@ void App::run() {
     // ---------------------------
     // Preview (robotA) appearance
     // ---------------------------
-    static bool  previewTint   = true;                 // keep vColor edges, tint orange
+    // robotA will render with semi-transparent faces and the same opaque
+    // feature edges as robotB (MoveIt-like preview). Hardcoded preview alpha.
     static float previewAlpha  = 0.35f;                // opacity for robotA
-    static float previewColor[3] = {1.0f, 0.55f, 0.15f}; // orange
-    static float previewTintStrength = 1.0f;           // 0..1, usually 1 for "fully orange"
 
     while (!glfwWindowShouldClose(window_)) {
         beginFrame();
@@ -438,12 +437,7 @@ void App::run() {
                     }
                 }
             }
-            ImGui::Separator();
-            ImGui::Text("Preview robot (robotA look):");
-            ImGui::Checkbox("Tint mode (preserves edges)", &previewTint);
-            ImGui::ColorEdit3("robotA tint color", previewColor);
-            ImGui::SliderFloat("robotA tint strength", &previewTintStrength, 0.0f, 1.0f, "%.2f");
-            ImGui::SliderFloat("robotA opacity", &previewAlpha, 0.0f, 1.0f, "%.2f");
+            // Preview appearance controls removed - preview is fixed
 
             if (chainBuiltA) {
                 if (ImGui::Button("Snap gizmo to robotA EE (pos+rot)")) {
@@ -574,24 +568,26 @@ void App::run() {
         shader.setFloat("uAlpha", 1.0f);
         if (robotLoadedB) robotB.Draw(shader);
 
-        // ---- Draw robotA tinted (preview robot) preserving edges ----
-        if (robotLoadedA) {
-            // Transparency: depth test ON, depth write OFF
-            glDepthMask(GL_FALSE);
+            // ---- Draw robotA preview: translucent faces, opaque feature edges ----
+            if (robotLoadedA) {
+                // Draw translucent faces first (depth writes off so translucency blends)
+                glDepthMask(GL_FALSE);
 
-            shader.setBool("uUseUniformColor", false); // IMPORTANT: keep vColor so edges match
-            shader.setBool("uTintEnabled", previewTint);
-            shader.setVec3("uTintColor", glm::vec3(previewColor[0], previewColor[1], previewColor[2]));
-            shader.setFloat("uTintStrength", std::clamp(previewTintStrength, 0.0f, 1.0f));
-            shader.setFloat("uAlpha", std::clamp(previewAlpha, 0.0f, 1.0f));
+                shader.setBool("uUseUniformColor", false); // keep vertex colors for faces
+                shader.setBool("uTintEnabled", false);
+                shader.setFloat("uAlpha", std::clamp(previewAlpha, 0.0f, 1.0f));
 
-            robotA.Draw(shader);
+                robotA.DrawPreview(shader);
 
-            // restore
-            shader.setBool("uTintEnabled", false);
-            shader.setFloat("uAlpha", 1.0f);
-            glDepthMask(GL_TRUE);
-        }
+                // restore depth writes and draw opaque edges on top
+                shader.setFloat("uAlpha", 1.0f);
+                glDepthMask(GL_TRUE);
+
+                shader.setBool("uUseUniformColor", false);
+                shader.setBool("uTintEnabled", false);
+                shader.setFloat("uAlpha", 1.0f);
+                robotA.DrawEdges(shader);
+                }
 
         // ---- Draw gizmo at target ----
         gizmoCyls.clear();
