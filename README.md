@@ -1,1 +1,6 @@
-C++ Inverse Kinematics Visualizer. Automatically calculates IK and outputs joint angles
+C++ Inverse Kinematics & Trajectory Visualizer
+* Designed for 6 DOF Robotic Arms
+* Render Robot from URDF
+* Visualize Trajectories
+* Jog Trajectories
+* & more
