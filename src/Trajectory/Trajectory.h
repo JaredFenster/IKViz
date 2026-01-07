@@ -18,6 +18,8 @@ public:
     glm::vec3 getPos(int index)   const { return poses.at(index).pos; }
     glm::quat getRot(int index)   const { return poses.at(index).rot; }
 
+    bool isLast(int index) const { return index == (int)points.size() - 1; }
+
     int getNumPoints() const { return (int)points.size(); }
     int getNumPoses()  const { return (int)poses.size(); }
 

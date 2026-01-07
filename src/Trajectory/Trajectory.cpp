@@ -32,7 +32,7 @@ void Trajectory::GeneratePoses(const glm::vec3& startPos, const glm::quat& start
     poses.reserve(density);
     points.reserve(density);
 
-    for (int k = 0; k < density; ++k) {
+    for (int k = 0; k + 1 < density; ++k) {
         float t = (float)k / (float)(density - 1);
 
         PoseSample s;
@@ -42,4 +42,9 @@ void Trajectory::GeneratePoses(const glm::vec3& startPos, const glm::quat& start
         poses.push_back(s);
         points.push_back(s.pos);
     }
+    PoseSample last;
+    last.pos = endPos;
+    last.rot = endRot;
+    poses.push_back(last);
+    points.push_back(last.pos);
 }

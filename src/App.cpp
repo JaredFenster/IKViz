@@ -345,8 +345,10 @@ void App::run()
     const glm::vec3 robotATintColor = glm::vec3(1.0f, 0.55f, 0.10f); // orange
     const float robotATintStrength = 1.0f; // full orange
 
+
     while (!glfwWindowShouldClose(window_))
     {
+
         beginFrame();
         ImGuiIO& io = ImGui::GetIO();
 
@@ -626,6 +628,8 @@ void App::run()
             }
         }
 
+
+
         // ---- Draw grid ----
         shader.setBool("uUseUniformColor", false);
         shader.setBool("uTintEnabled", false);
@@ -644,6 +648,7 @@ void App::run()
         shader.setMat4("uModel", glm::mat4(1.0f));
         shader.setFloat("uAlpha", 0.5f); // Opacity
         if (robotLoadedA) robotA.Draw(shader);
+
 
         // ---- Draw gizmo at target ----
         gizmoCyls.clear();
