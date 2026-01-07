@@ -31,6 +31,7 @@
 #include "ImGuizmo/ImGuizmo.h"
 #include "InverseKinematics/IK.h"
 #include "Trajectory/Trajectory.h"
+#include "Trajectory/Jog.h"
 
 #ifndef PROJECT_ROOT_DIR
 #define PROJECT_ROOT_DIR "."
@@ -319,7 +320,7 @@ void App::run()
 
     // IK controls
     static bool ikEnabled = true;
-    static bool ikSolveEveryFrame = false;
+    static bool ikSolveEveryFrame = true;
     static bool ikUseOrientation = true;
 
     static int ikMaxIter = 60;
@@ -331,9 +332,11 @@ void App::run()
 
     // Jog controls
     static int density = 1000;
-    static int jogIndex = 0;
     static bool jogging = false;
     static Trajectory traj;
+    static Trajectory trajTempRender;
+    static Jog JogTempRender;
+    static Jog jogger;
 
     static int jogStride = 1;
     static bool jogInterpRotation = true;
@@ -345,10 +348,14 @@ void App::run()
     const glm::vec3 robotATintColor = glm::vec3(1.0f, 0.55f, 0.10f); // orange
     const float robotATintStrength = 1.0f; // full orange
 
+    static bool renderTrajectory = false;
+    static URDFIK::FKResult renderTrajectoryPos;
+    static bool renderingTrajectory = false;
+
+
 
     while (!glfwWindowShouldClose(window_))
     {
-
         beginFrame();
         ImGuiIO& io = ImGui::GetIO();
 
@@ -396,8 +403,8 @@ void App::run()
         glm::mat4 proj = camera.orthoProjFromRadius(window_);
         glm::vec3 camPos = camera.getCamPos();
         glm::vec3 camForward = glm::normalize(-glm::vec3(view[2]));
-
-        gizmo.update(
+        if (!renderTrajectory){
+            gizmo.update(
             gizmo.target,
             view,
             proj,
@@ -406,9 +413,9 @@ void App::run()
             mx, my,
             (float)fbW, (float)fbH,
             lmbDown, lmbPressed, lmbReleased
-        );
+            );
+        }
         gizmo.target.rot = glm::normalize(gizmo.target.rot);
-
         shader.use();
         shader.setMat4("uView", view);
         shader.setMat4("uProj", proj);
@@ -464,6 +471,7 @@ void App::run()
             ImGui::SliderFloat("Damping (lambda)", &ikLambda, 0.001f, 2.0f, "%.3f");
 
             ImGui::Separator();
+            ImGui::Checkbox("Render Trajectory", &renderTrajectory);
             ImGui::Text("Jog:");
             ImGui::SliderInt("Jog Density", &density, 100, 5000);
             ImGui::SliderInt("Jog Stride (pts/frame)", &jogStride, 1, 50);
@@ -473,7 +481,6 @@ void App::run()
                 if (robotLoadedB && chainBuiltB)
                 {
                     jogging = true;
-                    jogIndex = 0;
 
                     jogEndPos = gizmo.target.pos;
                     jogEndRot = gizmo.target.rot;
@@ -527,11 +534,48 @@ void App::run()
         ImGui::Text("pos: %.3f %.3f %.3f", gizmo.target.pos.x, gizmo.target.pos.y, gizmo.target.pos.z);
         ImGui::End();
 
-        // ---- IK solve (robotA only) ----
-        if (robotLoadedA && chainBuiltA && ikEnabled)
+        // ---- Render Trajectory or Pos ----
+        if (renderTrajectory && !renderingTrajectory)
         {
-            bool shouldSolve = ikSolveEveryFrame || gizmo.capturingMouse;
-            if (shouldSolve)
+            renderingTrajectory = true;
+
+            std::vector<glm::mat4> jf;
+            URDFIK::FKResult fk = URDFIK::ComputeFK(robotB.Robot(), chainB, jf);
+
+            renderTrajectoryPos.pos = gizmo.target.pos;
+            renderTrajectoryPos.rot = gizmo.target.rot;
+
+            if (jogInterpRotation) trajTempRender.GeneratePoses(fk.pos, fk.rot, renderTrajectoryPos.pos, renderTrajectoryPos.rot, density);
+            else trajTempRender.GeneratePoints(fk.pos, renderTrajectoryPos.pos, density);
+        }
+        if (!renderTrajectory && renderingTrajectory)
+        {
+            renderingTrajectory = false;
+            JogTempRender.stopJogging();
+
+        }
+
+        if (renderingTrajectory && robotLoadedA && chainBuiltA && ikEnabled)
+        {
+
+            JogTempRender.startJog(jogInterpRotation,
+                    &trajTempRender,&robotA,
+                    ikUseOrientation,
+                    ikPosTol,
+                    ikRotTol,
+                    ikRotWeight,
+                    jogStride,
+                    ikMaxStepDeg,
+                    ikLambda,
+                    ikMaxIter,
+                    &chainA,
+                    jogEndRot);
+            if (!JogTempRender.getJoggingStatus()) JogTempRender.restartJogging();
+        }
+
+        else if (robotLoadedA && chainBuiltA && ikEnabled)
+        {
+            if (ikSolveEveryFrame || gizmo.capturingMouse)
             {
                 float rotTolUse = ikUseOrientation ? ikRotTol : 999.0f;
                 float rotWUse = ikUseOrientation ? ikRotWeight : 0.0f;
@@ -554,77 +598,26 @@ void App::run()
         // ---- Jog solve (robotB only) ----
         if (jogging)
         {
+            renderTrajectory = false;
             if (!robotLoadedB || !chainBuiltB || !ikEnabled)
             {
                 jogging = false;
-                jogIndex = 0;
             }
             else
             {
-                if (jogInterpRotation)
-                {
-                    const int n = traj.getNumPoses();
-                    if (n < 2)
-                    {
-                        jogging = false;
-                        jogIndex = 0;
-                    }
-                    else
-                    {
-                        jogIndex = std::clamp(jogIndex, 0, n - 1);
-
-                        glm::vec3 jogPos = traj.getPos(jogIndex);
-                        glm::quat jogRot = traj.getRot(jogIndex);
-
-                        float rotTolUse = ikUseOrientation ? ikRotTol : 999.0f;
-                        float rotWUse = ikUseOrientation ? ikRotWeight : 0.0f;
-
-                        (void)URDFIK::SolvePoseHierDLS(
-                            robotB.Robot(), chainB,
-                            jogPos, jogRot,
-                            ikMaxIter, ikPosTol, rotTolUse,
-                            ikMaxStepDeg, rotWUse, ikLambda
-                        );
-
-                        jogIndex += std::max(1, jogStride);
-                        if (jogIndex >= n)
-                        {
-                            jogIndex = 0;
-                            jogging = false;
-                        }
-                    }
-                }
-                else
-                {
-                    const int n = traj.getNumPoints();
-                    if (n < 2)
-                    {
-                        jogging = false;
-                        jogIndex = 0;
-                    }
-                    else
-                    {
-                        jogIndex = std::clamp(jogIndex, 0, n - 1);
-                        glm::vec3 jogPos = traj.getPoint(jogIndex);
-
-                        float rotTolUse = ikUseOrientation ? ikRotTol : 999.0f;
-                        float rotWUse = ikUseOrientation ? ikRotWeight : 0.0f;
-
-                        (void)URDFIK::SolvePoseHierDLS(
-                            robotB.Robot(), chainB,
-                            jogPos, jogEndRot,
-                            ikMaxIter, ikPosTol, rotTolUse,
-                            ikMaxStepDeg, rotWUse, ikLambda
-                        );
-
-                        jogIndex += std::max(1, jogStride);
-                        if (jogIndex >= n)
-                        {
-                            jogIndex = 0;
-                            jogging = false;
-                        }
-                    }
-                }
+                jogger.startJog(jogInterpRotation,
+                    &traj,&robotB,
+                    ikUseOrientation,
+                    ikPosTol,
+                    ikRotTol,
+                    ikRotWeight,
+                    jogStride,
+                    ikMaxStepDeg,
+                    ikLambda,
+                    ikMaxIter,
+                    &chainB,
+                    jogEndRot);
+                jogging = jogger.getJoggingStatus();
             }
         }
 
@@ -651,22 +644,23 @@ void App::run()
 
 
         // ---- Draw gizmo at target ----
-        gizmoCyls.clear();
-        gizmo.draw(gizmo.target, proj, drawCylinder);
 
-        shader.setBool("uTintEnabled", false);
-        shader.setBool("uUseUniformColor", true);
-        shader.setFloat("uAlpha", 1.0f);
+            gizmoCyls.clear();
+            gizmo.draw(gizmo.target, proj, drawCylinder);
 
-        for (const auto& seg : gizmoCyls)
-        {
-            shader.setVec3("uUniformColor", seg.c);
-            shader.setMat4("uModel", cylinderModel(seg.a, seg.b, seg.r));
-            unitCyl.drawTriangles();
-        }
+            shader.setBool("uTintEnabled", false);
+            shader.setBool("uUseUniformColor", true);
+            shader.setFloat("uAlpha", 1.0f);
 
-        shader.setBool("uUseUniformColor", false);
-        shader.setFloat("uAlpha", 1.0f);
+            for (const auto& seg : gizmoCyls)
+            {
+                shader.setVec3("uUniformColor", seg.c);
+                shader.setMat4("uModel", cylinderModel(seg.a, seg.b, seg.r));
+                unitCyl.drawTriangles();
+            }
+
+            shader.setBool("uUseUniformColor", false);
+            shader.setFloat("uAlpha", 1.0f);
 
         endFrame();
     }

@@ -30,6 +30,8 @@ add_executable(ArmViz
   src/Renderer/STLLoader.cpp
   src/Renderer/FeatureEdges.cpp
   src/Trajectory/Trajectory.cpp
+  src/Trajectory/Jog.h
+  src/Trajectory/Jog.cpp
 )
 
 
