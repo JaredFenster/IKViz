@@ -32,6 +32,8 @@ add_executable(ArmViz
   src/Trajectory/Trajectory.cpp
   src/Trajectory/Jog.h
   src/Trajectory/Jog.cpp
+        src/Utilities/Utilities.h
+        src/Utilities/Utilities.cpp
 )
 
 

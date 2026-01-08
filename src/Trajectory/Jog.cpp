@@ -5,11 +5,9 @@
 #include "Jog.h"
 
 #include "../Robot/RobotScene.h"
-#include "../Robot/URDFRobot.h"
 #include "../ImGuizmo/ImGuizmo.h"
 #include "../InverseKinematics/IK.h"
 #include "../Trajectory/Trajectory.h"
-#include <iostream>
 
 void Jog::startJog(bool jogInterpRotation,
         Trajectory *traj,

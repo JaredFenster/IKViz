@@ -1,3 +1,5 @@
+
+
 #include "App.h"
 #define GLM_ENABLE_EXPERIMENTAL
 
@@ -32,6 +34,7 @@
 #include "InverseKinematics/IK.h"
 #include "Trajectory/Trajectory.h"
 #include "Trajectory/Jog.h"
+#include "Utilities/Utilities.h"
 
 #ifndef PROJECT_ROOT_DIR
 #define PROJECT_ROOT_DIR "."
@@ -145,52 +148,12 @@ static std::string pickExistingPath(const std::string& a, const std::string& b)
     return a;
 }
 
+
 void App::run()
 {
-    const char* vsSrc = R"GLSL(
-        #version 330 core
-        layout (location = 0) in vec3 aPos;
-        layout (location = 1) in vec3 aColor;
+    Utilities utils;
 
-        uniform mat4 uView;
-        uniform mat4 uProj;
-        uniform mat4 uModel;
-
-        out vec3 vColor;
-
-        void main() {
-            vColor = aColor;
-            gl_Position = uProj * uView * uModel * vec4(aPos, 1.0);
-        }
-    )GLSL";
-
-    const char* fsSrc = R"GLSL(
-        #version 330 core
-        in vec3 vColor;
-        out vec4 FragColor;
-
-        uniform float uAlpha;
-
-        uniform bool uUseUniformColor;
-        uniform vec3 uUniformColor;
-
-        // tint mode (mixes tint with existing vColor/uniform)
-        uniform bool  uTintEnabled;
-        uniform vec3  uTintColor;
-        uniform float uTintStrength; // 0 = no tint, 1 = full tint
-
-        void main() {
-            vec3 col = uUseUniformColor ? uUniformColor : vColor;
-
-            if (uTintEnabled) {
-                col = mix(col, uTintColor, clamp(uTintStrength, 0.0, 1.0));
-            }
-
-            FragColor = vec4(col, uAlpha);
-        }
-    )GLSL";
-
-    Shader shader(vsSrc, fsSrc);
+    Shader shader(utils.vsSrc, utils.fsSrc);
 
     Mesh grid = Mesh::fromVertexColorLines(makeGridVerts(10));
     Mesh unitCyl = Mesh::fromVertexColorTriangles(makeCylinderVerts(1.0f, 1.0f, 24));
@@ -198,11 +161,6 @@ void App::run()
     OrbitCamera camera;
     camera.attachToWindow(window_);
 
-    // ===========================
-    // TWO ROBOTS (same URDF)
-    //  - robotA: controlled by gizmo/IK
-    //  - robotB: "real" robot, normal render
-    // ===========================
     RobotScene robotA;
     RobotScene robotB;
 
@@ -220,100 +178,26 @@ void App::run()
     bool chainBuiltA = false;
     bool chainBuiltB = false;
 
-    auto loadRobots = [&]()
-    {
-        robotLoadedA = robotLoadedB = false;
-        robotErrA.clear();
-        robotErrB.clear();
-        chainBuiltA = chainBuiltB = false;
-        chainA = URDFIK::ChainInfo{};
-        chainB = URDFIK::ChainInfo{};
 
-        // robotA
-        try
-        {
-            robotLoadedA = robotA.LoadURDF(urdfPath, meshesRoot);
-            if (!robotLoadedA)
-            {
-                robotErrA = "RobotScene::LoadURDF returned false (paths or parse failed).";
-            }
-            else
-            {
-                chainA = URDFIK::BuildSerialChain(robotA.Robot());
-                chainBuiltA = !chainA.jointIdx.empty();
-                if (!chainBuiltA) robotErrA = "Loaded robotA, but failed to build a serial joint chain.";
-            }
-        }
-        catch (const std::exception& e)
-        {
-            robotLoadedA = false;
-            robotErrA = e.what();
-            chainBuiltA = false;
-        }
-
-        // robotB
-        try
-        {
-            robotLoadedB = robotB.LoadURDF(urdfPath, meshesRoot);
-            if (!robotLoadedB)
-            {
-                robotErrB = "RobotScene::LoadURDF returned false (paths or parse failed).";
-            }
-            else
-            {
-                chainB = URDFIK::BuildSerialChain(robotB.Robot());
-                chainBuiltB = !chainB.jointIdx.empty();
-                if (!chainBuiltB) robotErrB = "Loaded robotB, but failed to build a serial joint chain.";
-            }
-        }
-        catch (const std::exception& e)
-        {
-            robotLoadedB = false;
-            robotErrB = e.what();
-            chainBuiltB = false;
-        }
-    };
-
-    loadRobots();
+    utils.loadRobots(
+        &robotLoadedA,
+        &robotLoadedB,
+        &chainBuiltA,
+        &chainBuiltB,
+        &robotErrA,
+        &robotErrB,
+        &chainA,
+        &chainB,
+        &robotA,
+        &robotB,
+        urdfPath,
+        meshesRoot
+    );
 
     // Gizmo
     static ImGuizmoLite::Gizmo gizmo;
     static bool gizmoInit = false;
 
-    struct GizmoCyl
-    {
-        glm::vec3 a, b;
-        float r;
-        glm::vec3 c;
-    };
-    std::vector<GizmoCyl> gizmoCyls;
-
-    auto drawCylinder = [&](const glm::vec3& a, const glm::vec3& b, float radius, const glm::vec3& color)
-    {
-        gizmoCyls.push_back({a, b, radius, color});
-    };
-
-    auto cylinderModel = [&](const glm::vec3& a, const glm::vec3& b, float radius) -> glm::mat4
-    {
-        glm::vec3 d = b - a;
-        float len = glm::length(d);
-        if (len < 1e-6f) return glm::mat4(1.0f);
-
-        glm::vec3 z = d / len;
-        glm::vec3 up = (std::fabs(z.y) < 0.99f) ? glm::vec3(0, 1, 0) : glm::vec3(1, 0, 0);
-        glm::vec3 x = glm::normalize(glm::cross(up, z));
-        glm::vec3 y = glm::cross(z, x);
-
-        glm::mat4 R(1.0f);
-        R[0] = glm::vec4(x, 0.0f);
-        R[1] = glm::vec4(y, 0.0f);
-        R[2] = glm::vec4(z, 0.0f);
-
-        glm::mat4 S = glm::scale(glm::mat4(1.0f), glm::vec3(radius, radius, len));
-        glm::mat4 T = glm::translate(glm::mat4(1.0f), a);
-
-        return T * R * S;
-    };
 
     bool rWasDown = false;
     static bool prevMouseDown = false;
@@ -344,14 +228,10 @@ void App::run()
     static glm::vec3 jogEndPos(0.0f);
     static glm::quat jogEndRot(1, 0, 0, 0);
 
-    // robotA tint (same opacity/edges as robotB, just orange)
-    const glm::vec3 robotATintColor = glm::vec3(1.0f, 0.55f, 0.10f); // orange
-    const float robotATintStrength = 1.0f; // full orange
 
     static bool renderTrajectory = false;
     static URDFIK::FKResult renderTrajectoryPos;
     static bool renderingTrajectory = false;
-
 
 
     while (!glfwWindowShouldClose(window_))
@@ -403,16 +283,17 @@ void App::run()
         glm::mat4 proj = camera.orthoProjFromRadius(window_);
         glm::vec3 camPos = camera.getCamPos();
         glm::vec3 camForward = glm::normalize(-glm::vec3(view[2]));
-        if (!renderTrajectory){
+        if (!renderTrajectory)
+        {
             gizmo.update(
-            gizmo.target,
-            view,
-            proj,
-            camPos,
-            camForward,
-            mx, my,
-            (float)fbW, (float)fbH,
-            lmbDown, lmbPressed, lmbReleased
+                gizmo.target,
+                view,
+                proj,
+                camPos,
+                camForward,
+                mx, my,
+                (float)fbW, (float)fbH,
+                lmbDown, lmbPressed, lmbReleased
             );
         }
         gizmo.target.rot = glm::normalize(gizmo.target.rot);
@@ -446,14 +327,37 @@ void App::run()
                 ImGui::TextColored(ImVec4(1, 0.35f, 0.35f, 1), "robotB NOT loaded");
                 ImGui::TextWrapped("%s", robotErrB.c_str());
             }
-            if (ImGui::Button("Retry Load")) loadRobots();
+            if (ImGui::Button("Retry Load"))
+                utils.loadRobots(&robotLoadedA,
+                           &robotLoadedB,
+                           &chainBuiltA,
+                           &chainBuiltB,
+                           &robotErrA,
+                           &robotErrB,
+                           &chainA,
+                           &chainB,
+                           &robotA,
+                           &robotB,
+                           urdfPath,
+                           meshesRoot);
         }
         else
         {
             if (ImGui::Button("Reload URDF (both)"))
             {
                 gizmoInit = false;
-                loadRobots();
+                utils.loadRobots(&robotLoadedA,
+                           &robotLoadedB,
+                           &chainBuiltA,
+                           &chainBuiltB,
+                           &robotErrA,
+                           &robotErrB,
+                           &chainA,
+                           &chainB,
+                           &robotA,
+                           &robotB,
+                           urdfPath,
+                           meshesRoot);
             }
 
             ImGui::Separator();
@@ -545,31 +449,30 @@ void App::run()
             renderTrajectoryPos.pos = gizmo.target.pos;
             renderTrajectoryPos.rot = gizmo.target.rot;
 
-            if (jogInterpRotation) trajTempRender.GeneratePoses(fk.pos, fk.rot, renderTrajectoryPos.pos, renderTrajectoryPos.rot, density);
+            if (jogInterpRotation) trajTempRender.GeneratePoses(fk.pos, fk.rot, renderTrajectoryPos.pos,
+                                                                renderTrajectoryPos.rot, density);
             else trajTempRender.GeneratePoints(fk.pos, renderTrajectoryPos.pos, density);
         }
         if (!renderTrajectory && renderingTrajectory)
         {
             renderingTrajectory = false;
             JogTempRender.stopJogging();
-
         }
 
         if (renderingTrajectory && robotLoadedA && chainBuiltA && ikEnabled)
         {
-
             JogTempRender.startJog(jogInterpRotation,
-                    &trajTempRender,&robotA,
-                    ikUseOrientation,
-                    ikPosTol,
-                    ikRotTol,
-                    ikRotWeight,
-                    jogStride,
-                    ikMaxStepDeg,
-                    ikLambda,
-                    ikMaxIter,
-                    &chainA,
-                    jogEndRot);
+                                   &trajTempRender, &robotA,
+                                   ikUseOrientation,
+                                   ikPosTol,
+                                   ikRotTol,
+                                   ikRotWeight,
+                                   jogStride,
+                                   ikMaxStepDeg,
+                                   ikLambda,
+                                   ikMaxIter,
+                                   &chainA,
+                                   jogEndRot);
             if (!JogTempRender.getJoggingStatus()) JogTempRender.restartJogging();
         }
 
@@ -606,21 +509,20 @@ void App::run()
             else
             {
                 jogger.startJog(jogInterpRotation,
-                    &traj,&robotB,
-                    ikUseOrientation,
-                    ikPosTol,
-                    ikRotTol,
-                    ikRotWeight,
-                    jogStride,
-                    ikMaxStepDeg,
-                    ikLambda,
-                    ikMaxIter,
-                    &chainB,
-                    jogEndRot);
+                                &traj, &robotB,
+                                ikUseOrientation,
+                                ikPosTol,
+                                ikRotTol,
+                                ikRotWeight,
+                                jogStride,
+                                ikMaxStepDeg,
+                                ikLambda,
+                                ikMaxIter,
+                                &chainB,
+                                jogEndRot);
                 jogging = jogger.getJoggingStatus();
             }
         }
-
 
 
         // ---- Draw grid ----
@@ -645,22 +547,22 @@ void App::run()
 
         // ---- Draw gizmo at target ----
 
-            gizmoCyls.clear();
-            gizmo.draw(gizmo.target, proj, drawCylinder);
+        utils.gizmoCyls.clear();
+        gizmo.draw(gizmo.target, proj, utils.drawCylinderCallback());
 
-            shader.setBool("uTintEnabled", false);
-            shader.setBool("uUseUniformColor", true);
-            shader.setFloat("uAlpha", 1.0f);
+        shader.setBool("uTintEnabled", false);
+        shader.setBool("uUseUniformColor", true);
+        shader.setFloat("uAlpha", 1.0f);
 
-            for (const auto& seg : gizmoCyls)
-            {
-                shader.setVec3("uUniformColor", seg.c);
-                shader.setMat4("uModel", cylinderModel(seg.a, seg.b, seg.r));
-                unitCyl.drawTriangles();
-            }
+        for (const auto& seg : utils.gizmoCyls)
+        {
+            shader.setVec3("uUniformColor", seg.c);
+            shader.setMat4("uModel", utils.cylinderModel(seg.a, seg.b, seg.r));
+            unitCyl.drawTriangles();
+        }
 
-            shader.setBool("uUseUniformColor", false);
-            shader.setFloat("uAlpha", 1.0f);
+        shader.setBool("uUseUniformColor", false);
+        shader.setFloat("uAlpha", 1.0f);
 
         endFrame();
     }

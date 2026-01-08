@@ -1,7 +1,7 @@
 //
 // Created by jared on 2026-01-07.
 //
-
+#pragma once
 #ifndef ARMVIZ_JOG_H
 #define ARMVIZ_JOG_H
 
