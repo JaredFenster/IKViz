@@ -35,6 +35,7 @@
 #include "Trajectory/Trajectory.h"
 #include "Trajectory/Jog.h"
 #include "Utilities/Utilities.h"
+#include "Objects/Cube.h"
 
 #ifndef PROJECT_ROOT_DIR
 #define PROJECT_ROOT_DIR "."
@@ -232,6 +233,9 @@ void App::run()
     static bool renderTrajectory = false;
     static URDFIK::FKResult renderTrajectoryPos;
     static bool renderingTrajectory = false;
+    static float cubeScale = 0.05f;
+    static Cube cube(glm::vec3(0.0f, 0.5f, cubeScale/2.0f), glm::quat(1,0,0,0), glm::vec3(cubeScale));
+    cube.SetParent(&robotB, &chainA);
 
 
     while (!glfwWindowShouldClose(window_))
@@ -415,7 +419,11 @@ void App::run()
             }
 
             ImGui::Separator();
+            if (ImGui::Button("Toggle Grab"))
+                cube.SetGrabbed(!cube.grabbed);
+            ImGui::Separator();
             ImGui::Text("Joints (radians) [editing robotA]:");
+
 
             auto& urdfA = robotA.Robot();
             for (const auto& j : urdfA.Joints())
@@ -523,6 +531,19 @@ void App::run()
                 jogging = jogger.getJoggingStatus();
             }
         }
+
+
+        cube.UpdateFromParentEE();
+
+        // draw cube (solid)
+        shader.setBool("uUseUniformColor", true);
+        shader.setVec3("uUniformColor", glm::vec3(0.2f, 0.8f, 1.0f));
+        shader.setFloat("uAlpha", 1.0f);
+        cube.Draw(shader);
+
+        // restore if you want (optional)
+        shader.setBool("uUseUniformColor", false);
+        shader.setFloat("uAlpha", 1.0f);
 
 
         // ---- Draw grid ----

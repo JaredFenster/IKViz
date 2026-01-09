@@ -37,6 +37,7 @@ add_executable(ArmViz
         src/Objects/Cube.h
         src/Trajectory/Task.h
         src/Trajectory/Task.cpp
+        src/Objects/Cube.cpp
 )
 
 
