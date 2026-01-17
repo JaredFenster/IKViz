@@ -6,7 +6,7 @@
 
 ### Interactive IK & Visualization
 
-![IKViz Demo](Docs/IKVIZ DEMO.gif)
+![IKViz Demo](Docs/IKVIZ_DEMO.gif)
 
 ## Features
 
