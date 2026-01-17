@@ -16,7 +16,7 @@ public:
          const glm::vec3& scale);
 
     // If grabbed == true, cube will follow the parent's end effector pose
-    void SetGrabbed(bool g) { grabbed = g; }
+    void SetGrabbed(bool g);
 
     // Call this once when you want the cube to follow a robot
     // (you provide the robot + its chain used for FK)
@@ -34,7 +34,6 @@ public:
 
     glm::vec3 pickVector{0.0f}; // kept for later
     bool grabbed = false;
-
     // kept for later (not used now)
     float gravity = 9.8f;
     float groundPlaneOffset = 0.0f;

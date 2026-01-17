@@ -106,3 +106,11 @@ void Cube::Draw(Shader& shader) const
     // (Your shader defaults in App set uUseUniformColor=false)
     SharedCubeMesh().drawTriangles();
 }
+
+void Cube::SetGrabbed(bool g)
+{
+    std::vector<glm::mat4> jf;
+    URDFIK::FKResult fk = URDFIK::ComputeFK(parent_->Robot(), *chain_, jf);
+
+    //if ee vector == grab vector
+}

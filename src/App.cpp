@@ -1,5 +1,5 @@
 
-
+#pragma once
 #include "App.h"
 #define GLM_ENABLE_EXPERIMENTAL
 
@@ -150,6 +150,8 @@ static std::string pickExistingPath(const std::string& a, const std::string& b)
 }
 
 
+
+
 void App::run()
 {
     Utilities utils;
@@ -236,7 +238,6 @@ void App::run()
     static float cubeScale = 0.05f;
     static Cube cube(glm::vec3(0.0f, 0.5f, cubeScale/2.0f), glm::quat(1,0,0,0), glm::vec3(cubeScale));
     cube.SetParent(&robotB, &chainA);
-
 
     while (!glfwWindowShouldClose(window_))
     {
